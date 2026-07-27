@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
-작성일: 2026-07-21  
-현재 단계: Phase 1 Backend 구현 중
+작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
+현재 단계: Phase 1 Backend 완료 — Render 배포 및 `/ready` 헬스체크 확인됨. 다음은 Phase 2.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -845,20 +845,21 @@ Migration/Seed(`test_migration_and_seed.py`, 2건):
 
 운영 Neon DB를 테스트에 사용하지 않는다. 별도 Neon `test` 브랜치를 사용한다.
 
-### 우선순위 6: Phase 1 마감 작업
+### 우선순위 6: Phase 1 마감 작업 (완료, 2026-07-28)
 
 - `/ready` DB 확인 API ✓ (상세는 9.1)
 - `backend/Dockerfile` + `backend/.dockerignore` ✓ (uv 기반, CMD가 `alembic upgrade head` 후 uvicorn 실행. 빌드는 Render에서, 로컬 Docker 불필요. `.env`는 이미지 제외)
-- `render.yaml` ✓ (저장소 루트, Docker runtime, `dockerContext: ./backend`, `healthCheckPath: /ready`)
-- 실제 운영/개발 Neon 브랜치 연결 + Migration·Seed 확인 — 사용자 환경 필요(아래)
+- `render.yaml` ✓ (저장소 루트, Docker runtime 참고용. 실제 배포는 Blueprint 유료라 Web Service 수동 설정으로 진행)
+- 실제 운영 Neon 브랜치 연결 + Migration 자동 적용 ✓ (컨테이너 기동 시 `alembic upgrade head`)
 - README 배포 섹션 ✓
-- Phase 1 Completion Checklist 재검토 — 남음
+- **Render 배포 완료** ✓ (2026-07-28, Docker Web Service 수동 설정, `/ready` → 200 OK 확인)
 
-배포 시 사용자가 할 일:
-1. 저장소를 GitHub에 push(현재 git 저장소 아님 → `git init` 필요).
-2. Render에서 Blueprint(또는 Web Service)로 저장소 연결(`render.yaml`이 빌드·헬스체크 설정 제공).
-3. Render 대시보드에 `DATABASE_URL`을 Secret으로 입력. test 브랜치와 분리된 Neon 운영 브랜치 사용, `?ssl=require`.
-4. 컨테이너 기동 시 `alembic upgrade head` 자동 실행, `/ready`로 헬스체크. Seed는 자동 실행하지 않음(필요 시 개발 DB에만 수동).
+실제 배포 방식(확정): Render **Web Service 수동 설정**(Blueprint는 유료).
+- Root Directory = `backend`, Dockerfile Path = `Dockerfile`, Runtime = Docker, Branch = `main`.
+- 환경변수: `DATABASE_URL`(test와 분리된 Neon 운영 브랜치, `?ssl=require`), `APP_ENV=production`.
+- Health Check Path = `/ready`. 컨테이너 기동 시 `alembic upgrade head` 자동 실행.
+- Seed는 자동 실행하지 않음(필요 시 개발 DB에만 수동).
+- Free 플랜은 15분 무요청 시 슬립 → 첫 요청 콜드스타트 있음.
 
 배포 결정: 백엔드는 Render(Docker 이미지 빌드는 Render 서버에서 수행, 로컬 Docker 불필요), DB는 Neon 운영 브랜치. Vercel은 서버리스라 이 상시 실행 ASGI 백엔드에는 부적합하며 추후 Flutter 프론트 배포용으로만 고려.
 
@@ -869,8 +870,6 @@ Phase 1 완료 전에는 Flutter, STT, LLM, Action Plan, Android Widget을 시�
 ```text
 Audit Log 조회 API
 Item Alias 모델과 검색
-Dockerfile
-Render 배포 검증
 ```
 
 Flutter, Android Widget, 음성, STT, LLM, Action Plan은 Phase 1 범위 밖이라 전혀 구현하지 않았다.
@@ -907,10 +906,10 @@ backend/migrations/versions/20260720_0002_add_audit_logs.py
 
 ## 17. 저장소 상태 관련 주의
 
-- 현재 `/Users/subeomlee/Desktop/workspace/housekeeper`는 Git 저장소가 아니다.
-- `.gitignore`는 있으나 Commit History는 없다.
+- Git 저장소이며 원격은 `github.com/subeomsp/housekeeper` (`main` 브랜치). 초기 히스토리는 단일 커밋으로 정리됨.
 - `__pycache__`, `.venv`, pytest/mypy/ruff 캐시는 `.gitignore` 대상이다.
-- `backend/.env`에 `TEST_DATABASE_URL` Secret이 있으며 `.gitignore` 대상이다. 절대 커밋하지 않는다.
+- `backend/.env`에 `DATABASE_URL`/`TEST_DATABASE_URL` Secret이 있으며 `.gitignore` 대상이다. 절대 커밋하지 않는다(현재 추적되는 것은 `.env.example`뿐).
+- 운영 `DATABASE_URL`은 코드/깃이 아니라 Render 대시보드 환경변수에만 둔다.
 
 ## 18. Claude가 바로 이어서 작업할 때 권장 시작 지시
 
