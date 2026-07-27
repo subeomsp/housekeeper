@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 
 import '../../../core/network/dio_client.dart';
+import '../domain/inventory_detail.dart';
 import '../domain/inventory_item.dart';
 
 /// Thin API client for the inventory endpoints. Converts Dio failures into the
@@ -34,6 +35,18 @@ class InventoryApi {
         },
       );
       return InventoryPage.fromJson(response.data ?? const {});
+    } on DioException catch (error) {
+      throw mapDioError(error);
+    }
+  }
+
+  /// GET /inventory/{itemId} — Snapshot + ten most recent events.
+  Future<InventoryDetail> fetchDetail(String itemId) async {
+    try {
+      final response = await _dio.get<Map<String, dynamic>>(
+        '/inventory/$itemId',
+      );
+      return InventoryDetail.fromJson(response.data ?? const {});
     } on DioException catch (error) {
       throw mapDioError(error);
     }
