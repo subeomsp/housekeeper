@@ -1,0 +1,14 @@
+# Never ship secrets or local-only artifacts into the image.
+.env
+.env.*
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.git/
+.gitignore
+
+# Tests are not needed in the runtime image.
+tests/

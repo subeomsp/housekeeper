@@ -1,0 +1,39 @@
+[project]
+name = "voice-inventory-agent-backend"
+version = "0.1.0"
+description = "Backend API for the Voice Inventory Agent"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic",
+    "asyncpg",
+    "fastapi",
+    "pydantic-settings",
+    "sqlalchemy[asyncio]",
+    "uvicorn[standard]",
+]
+
+[dependency-groups]
+dev = [
+    "httpx",
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["app", "tests"]

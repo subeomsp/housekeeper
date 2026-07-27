@@ -1,0 +1,17 @@
+# Render Blueprint for the Voice Inventory Agent backend.
+# Render builds the Docker image on its own servers; no local Docker is needed.
+# After connecting the repository, set DATABASE_URL in the Render dashboard as a
+# secret (it is intentionally not stored here).
+services:
+  - type: web
+    name: voice-inventory-agent-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /ready
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # set in the dashboard; a Neon branch separate from the test branch
