@@ -5,6 +5,7 @@ import '../features/history/presentation/history_page.dart';
 import '../features/home/presentation/home_page.dart';
 import '../features/inventory/presentation/inventory_detail_page.dart';
 import '../features/inventory/presentation/inventory_list_page.dart';
+import '../features/inventory/presentation/archived_inventory_items_page.dart';
 import '../features/settings/presentation/settings_page.dart';
 import '../features/shell/home_shell.dart';
 
@@ -36,6 +37,11 @@ GoRouter buildRouter() {
                 path: '/inventory',
                 builder: (context, state) => const InventoryListPage(),
                 routes: [
+                  GoRoute(
+                    path: 'archived',
+                    builder: (context, state) =>
+                        const ArchivedInventoryItemsPage(),
+                  ),
                   GoRoute(
                     path: ':itemId',
                     builder: (context, state) => InventoryDetailPage(

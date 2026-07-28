@@ -4,38 +4,171 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/format/date_format.dart';
 import '../../../core/format/quantity_format.dart';
 import '../../../core/widgets/async_view.dart';
+import '../../../core/errors/api_exception.dart';
+import '../../history/presentation/history_providers.dart';
 import '../domain/inventory_detail.dart';
 import 'event_display.dart';
+import 'inventory_item_form_sheet.dart';
 import 'inventory_providers.dart';
 import 'inventory_quantity_sheet.dart';
 
 /// Item detail: current Snapshot header + recent event history (spec §68.7).
-class InventoryDetailPage extends ConsumerWidget {
+class InventoryDetailPage extends ConsumerStatefulWidget {
   const InventoryDetailPage({super.key, required this.itemId});
 
   final String itemId;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final detailAsync = ref.watch(inventoryDetailProvider(itemId));
+  ConsumerState<InventoryDetailPage> createState() =>
+      _InventoryDetailPageState();
+}
+
+class _InventoryDetailPageState extends ConsumerState<InventoryDetailPage> {
+  bool _isMutating = false;
+
+  void _refreshAll() {
+    ref.invalidate(inventoryDetailProvider(widget.itemId));
+    ref.invalidate(inventoryListProvider);
+    ref.invalidate(archivedInventoryItemsProvider);
+    ref.invalidate(historyItemsProvider);
+    ref.invalidate(historyPageProvider);
+  }
+
+  Future<void> _edit(InventoryDetail detail) async {
+    final item = await showInventoryItemFormSheet(
+      context: context,
+      existing: detail,
+    );
+    if (item == null || !mounted) {
+      return;
+    }
+    _refreshAll();
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('${item.name} 정보를 수정했어요.')));
+  }
+
+  Future<void> _archive(InventoryDetail detail) async {
+    if (detail.quantity != 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('현재 수량을 0으로 설정한 뒤 보관해 주세요.')),
+      );
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('이 품목을 보관할까요?'),
+        content: Text(
+          '${detail.name}은(는) 재고 목록에서 숨겨집니다.\n\n'
+          'Snapshot과 기존 기록은 삭제되지 않으며 나중에 복원할 수 있어요.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('돌아가기'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('보관'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+    await _changeArchiveState(detail, restore: false);
+  }
+
+  Future<void> _changeArchiveState(
+    InventoryDetail detail, {
+    required bool restore,
+  }) async {
+    if (_isMutating) {
+      return;
+    }
+    setState(() => _isMutating = true);
+    try {
+      final api = ref.read(inventoryItemApiProvider);
+      final item = restore
+          ? await api.restoreItem(detail.itemId)
+          : await api.archiveItem(detail.itemId);
+      if (!mounted) {
+        return;
+      }
+      _refreshAll();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            restore ? '${item.name}을(를) 복원했어요.' : '${item.name}을(를) 보관했어요.',
+          ),
+        ),
+      );
+    } on ApiException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isMutating = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final detailAsync = ref.watch(inventoryDetailProvider(widget.itemId));
+    final detail = detailAsync.value;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('품목 상세'),
         actions: [
+          if (detail != null)
+            IconButton(
+              tooltip: '품목 정보 수정',
+              onPressed: _isMutating ? null : () => _edit(detail),
+              icon: const Icon(Icons.edit_outlined),
+            ),
+          if (detail != null && _isMutating)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: Center(
+                child: SizedBox.square(
+                  dimension: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            )
+          else if (detail != null && detail.isActive)
+            IconButton(
+              tooltip: '품목 보관',
+              onPressed: () => _archive(detail),
+              icon: const Icon(Icons.archive_outlined),
+            )
+          else if (detail != null)
+            IconButton(
+              tooltip: '품목 복원',
+              onPressed: () => _changeArchiveState(detail, restore: true),
+              icon: const Icon(Icons.unarchive_outlined),
+            ),
           IconButton(
             tooltip: '새로고침',
-            onPressed: () => ref.invalidate(inventoryDetailProvider(itemId)),
+            onPressed: () =>
+                ref.invalidate(inventoryDetailProvider(widget.itemId)),
             icon: const Icon(Icons.refresh),
           ),
         ],
       ),
       body: AsyncView<InventoryDetail>(
         value: detailAsync,
-        onRetry: () => ref.invalidate(inventoryDetailProvider(itemId)),
+        onRetry: () => ref.invalidate(inventoryDetailProvider(widget.itemId)),
         onData: (detail) => RefreshIndicator(
           onRefresh: () async =>
-              ref.invalidate(inventoryDetailProvider(itemId)),
+              ref.invalidate(inventoryDetailProvider(widget.itemId)),
           child: ListView(
             physics: const AlwaysScrollableScrollPhysics(),
             children: [

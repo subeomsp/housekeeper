@@ -22,8 +22,9 @@ A native macOS window opens — that is the app during Phase 2 development. The
 final target is Android (Phase 5).
 
 Current Phase 2 screens support inventory list/detail, manual stock-in/out,
-target quantity changes, and event history with correction/cancellation. Item
-creation, editing, archive, and restore follow next; see `../HANDOFF.md` §19.4.
+target quantity changes, event history with correction/cancellation, and item
+creation/edit/archive/restore. Cross-screen error and list-control finishing
+work follows next; see `../HANDOFF.md` §19.4.
 
 ### API server
 

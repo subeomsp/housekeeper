@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포됨. **Phase 2 (Flutter 앱) 진행 중** — 2-1(골격+재고목록), 2-2(품목상세), 2-3(입고/소비·목표수량), 2-4(기록 목록·Event 정정/취소) 완료, 다음은 2-5(품목 생성·수정·보관·복원). 상세는 아래 §19.
+현재 단계: Phase 1 Backend 완료·배포됨. **Phase 2 (Flutter 앱) 진행 중** — 2-1(골격+재고목록), 2-2(품목상세), 2-3(입고/소비·목표수량), 2-4(기록 목록·Event 정정/취소), 2-5(품목 생성·수정·보관·복원) 완료, 다음은 2-6(목록 제어·오류/새로고침 마감·Phase 2 종료). 상세는 아래 §19.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -979,18 +979,18 @@ frontend/lib/
     ├── home/ · settings/           # 홈/설정 (설정=현재 API 주소 표시)
     ├── history/                    # 기록 목록·필터·Pagination·Event 정정/취소
     └── inventory/
-        ├── domain/  inventory_item.dart · inventory_detail.dart
-        ├── data/inventory_api.dart # GET /inventory, GET /inventory/{id}
+        ├── domain/                 # Snapshot·상세·품목 관리 응답 모델
+        ├── data/                   # 재고·수량·품목 CRUD API Client
         └── presentation/
-            ├── inventory_providers.dart   # list Provider + detail FutureProvider.family
-            ├── inventory_list_page.dart    # 재고 목록(검색·새로고침·0수량 강조·탭→상세)
-            ├── inventory_detail_page.dart  # 상세 헤더 + 최근 Event 10건
-            └── event_display.dart          # Event 타입 한글 라벨/부호 색상
+            ├── inventory_list_page.dart          # 활성 재고·검색·수량 변경·품목 생성
+            ├── inventory_detail_page.dart        # 상세·최근 Event·수량/정보 변경·보관/복원
+            ├── archived_inventory_items_page.dart # 보관 품목 목록·복원
+            └── *_sheet.dart                      # 수량 변경·품목 생성/수정 공용 Sheet
 ```
 
 - 상태관리 Riverpod **3.x**: `StateProvider`가 기본 export에서 빠졌으니 `Notifier`/`NotifierProvider`를 쓴다(검색 상태 예시 참고).
 - 새로고침은 `ref.invalidate(provider)`로 처리(당겨서 새로고침 + 버튼).
-- 라우트(spec §27.1 일부): `/home`, `/inventory`, `/inventory/:itemId`, `/history`, `/settings`. `/recording`·`/action-plan/:requestId`는 Phase 3~4.
+- 라우트(spec §27.1 일부): `/home`, `/inventory`, `/inventory/archived`, `/inventory/:itemId`, `/history`, `/settings`. `/recording`·`/action-plan/:requestId`는 Phase 3~4.
 
 ### 19.4 Phase 2 세부 우선순위 (수직 슬라이스)
 
@@ -1000,8 +1000,8 @@ frontend/lib/
 | 2-2 | **품목 상세** + 최근 Event | `GET /inventory/{id}` | ✅ 완료 (커밋 `Phase 2-2`) |
 | 2-3 | **수동 입고/소비 + 목표 수량 설정** | `POST /inventory-events`(stock_in/out), `PUT /inventory/{id}/quantity` | ✅ 완료 |
 | 2-4 | **기록 목록** + Event 정정/취소 | `GET /inventory-events`, `PATCH`/`DELETE /inventory-events/{id}` | ✅ 완료 |
-| 2-5 | **품목 생성/수정/보관/복원** | `POST/PATCH/DELETE /inventory-items`, `POST .../restore` | ⏭ 다음 |
-| 2-6 | 오류 상태·수동 새로고침 마감 + Phase 2 종료 | (횡단) | 대기 |
+| 2-5 | **품목 생성/수정/보관/복원** | `POST/PATCH/DELETE /inventory-items`, `POST .../restore` | ✅ 완료 |
+| 2-6 | 목록 제어·오류 상태·수동 새로고침 마감 + Phase 2 종료 | (횡단) | ⏭ 다음 |
 
 Phase 2 완료 기준 체크리스트: product_spec.md **§61 Phase 2 항목** 및 스펙 §68 API 계약 참조.
 
@@ -1026,14 +1026,25 @@ Phase 2 완료 기준 체크리스트: product_spec.md **§61 Phase 2 항목** �
 - 검증(2026-07-28): Flutter 3.32.8 / Dart 3.8.1 기준 `flutter analyze` 이슈 0, `flutter test` 15 passed. 필터·Pagination 상태, 실제 API query/body, 보관 품목 Pagination, 정정 기본값, Reversal Action 제한을 테스트한다.
 - 실제 Render Read-only 확인: `/ready` 200, Event 5건·품목 5건 응답과 Front 모델 필드 일치. 운영 데이터에는 정정·취소 요청을 보내지 않았다. macOS 실행은 이 장비의 Xcode/CocoaPods 부재로 미검증이다.
 
-### 19.7 2-5 착수 지침 (바로 다음 작업)
+### 19.7 2-5 구현 결과
 
-- 품목 목록에서 생성, 상세에서 정보 수정·보관, 보관 품목 목록에서 복원 흐름을 연결한다.
-- 생성은 `POST /inventory-items`, 수정은 `PATCH /inventory-items/{id}`, 보관은 `DELETE /inventory-items/{id}`, 복원은 `POST /inventory-items/{id}/restore`를 사용한다.
-- 품목명·기본 단위·카테고리를 입력하며 이름 정규화·중복, 단위 변경과 보관의 현재 수량 0 제한은 Backend 오류 메시지로 표시한다.
-- 보관은 Soft Delete이며 Snapshot과 Event를 보존한다는 점을 확인 Dialog에 명시한다. 성공 후 품목·재고·기록의 품목 참조 캐시를 갱신한다.
+- 재고 목록에 `품목 추가` FAB와 `보관된 품목` 진입을 추가했다. 생성 Form은 품목명·기본 단위·선택 카테고리를 받고 기본 단위는 입력 비용을 줄이기 위해 `개`로 시작하되 즉시 수정할 수 있다.
+- 생성은 `POST /inventory-items`를 호출한다. Backend는 품목과 수량 0 Snapshot, Audit Log를 한 Transaction으로 생성하며 중복 정규화 이름과 잘못된 입력은 공통 오류 메시지로 표시한다.
+- 상세 App Bar에서 활성·비활성 품목 정보를 모두 수정할 수 있다. 재고가 남아 있으면 기본 단위 필드를 잠그고 “수량 0일 때만 변경 가능” 안내를 표시하며, Backend도 Row Lock 후 같은 조건을 검증한다. 빈 카테고리는 `null`로 보내 기존 값을 지울 수 있다.
+- 수량 0인 활성 품목은 확인 Dialog를 거쳐 Soft Delete한다. Dialog에서 Snapshot과 Event는 삭제되지 않고 복원 가능함을 명시한다. 수량이 남아 있으면 API 호출 전에 목표 수량을 0으로 설정하도록 안내하고 Backend의 `ITEM_HAS_INVENTORY` 검증도 유지한다.
+- 보관함은 `include_inactive=true` 품목 목록을 100개씩 끝까지 조회해 비활성 품목만 표시한다. 각 행과 비활성 상세에서 복원할 수 있으며 요청 중 동일 품목의 중복 복원을 막는다.
+- 생성·수정·보관·복원 성공 후 활성 재고 목록, 보관함, 해당 상세, 기록 화면의 품목명 참조 캐시를 함께 invalidate한다.
+- 검증(2026-07-28): Flutter 3.32.8 / Dart 3.8.1 기준 `flutter analyze` 이슈 0, `flutter test` 24 passed. API body·Soft Delete endpoint·전체 품목 Pagination·Form 기본값·단위 잠금·보관 안내·보관함 복원을 테스트한다.
+- 실제 Render Read-only 확인: 전체 품목 5개(활성 5, 보관 0)와 응답 필드 일치. 운영 데이터에는 생성·수정·보관·복원 요청을 보내지 않았다. Backend/DB/Migration 변경은 없다.
 
-### 19.8 검증/작업 관례
+### 19.8 2-6 착수 지침 (바로 다음 작업)
+
+- `product_spec.md` §28.2와 §61을 다시 대조해 재고 목록의 카테고리, 수량 0 포함 여부, 이름/최근 변경/수량 정렬 제어를 마감한다. 보관 품목은 현재 별도 보관함으로 제공한다.
+- 목록·상세·기록·보관함·입력 Sheet의 Loading/Empty/Error/Retry와 수동 새로고침을 실제 네트워크 오류·Backend 오류 기준으로 일관되게 점검한다.
+- 검색 실행/초기화, 필터 변경, Pagination, Mutation 이후 Provider invalidate가 화면별로 올바른지 Widget Test를 보강한다.
+- Phase 2 완료 기준을 전체 확인하고 README/HANDOFF를 완료 상태로 전환한다. Xcode/CocoaPods가 준비된 장비에서는 macOS 실제 앱으로 Render Read-only 화면과 테스트 전용 DB 대상 쓰기 흐름을 수동 확인한다.
+
+### 19.9 검증/작업 관례
 
 - 프론트: `cd frontend && flutter analyze`(이슈 0 유지) + `flutter test`. 각 슬라이스 후 앱 재실행으로 실제 Render 데이터로 확인.
 - 백엔드 변경 시: `cd backend && uv run pytest && uv run ruff check . && uv run mypy app tests`.

@@ -4,7 +4,9 @@ import 'package:go_router/go_router.dart';
 
 import '../../../core/format/quantity_format.dart';
 import '../../../core/widgets/async_view.dart';
+import '../../history/presentation/history_providers.dart';
 import '../domain/inventory_item.dart';
+import 'inventory_item_form_sheet.dart';
 import 'inventory_providers.dart';
 import 'inventory_quantity_sheet.dart';
 
@@ -12,6 +14,20 @@ import 'inventory_quantity_sheet.dart';
 /// supports search, manual refresh, and taps through to item detail.
 class InventoryListPage extends ConsumerWidget {
   const InventoryListPage({super.key});
+
+  Future<void> _createItem(BuildContext context, WidgetRef ref) async {
+    final item = await showInventoryItemFormSheet(context: context);
+    if (item == null || !context.mounted) {
+      return;
+    }
+    ref.invalidate(inventoryListProvider);
+    ref.invalidate(archivedInventoryItemsProvider);
+    ref.invalidate(historyItemsProvider);
+    ref.invalidate(historyPageProvider);
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('${item.name}을(를) 추가했어요.')));
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -22,11 +38,21 @@ class InventoryListPage extends ConsumerWidget {
         title: const Text('재고'),
         actions: [
           IconButton(
+            tooltip: '보관된 품목',
+            onPressed: () => context.push('/inventory/archived'),
+            icon: const Icon(Icons.inventory_2_outlined),
+          ),
+          IconButton(
             tooltip: '새로고침',
             onPressed: () => ref.invalidate(inventoryListProvider),
             icon: const Icon(Icons.refresh),
           ),
         ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _createItem(context, ref),
+        icon: const Icon(Icons.add),
+        label: const Text('품목 추가'),
       ),
       body: Column(
         children: [
