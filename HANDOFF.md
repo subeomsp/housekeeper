@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1~3-3 Action Plan 생성·확인·편집 완료**. 다음은 Phase 3-4 승인·Execute Transaction이며, 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19~20.
+현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1~3-4 Action Plan 생성·확인·편집·실행 완료**. 다음은 Phase 3-5 품목 후보·Alias 승인 흐름이며, 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19~20.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -1080,8 +1080,8 @@ Snapshot 변경을 만들지 않는다.
 | 3-1 | VoiceRequest·ActionPlan·ItemAlias 모델/Migration + 텍스트 Transcript 접수 API | ✅ 완료 |
 | 3-2 | Planner Provider 경계 + 엄격한 Plan Schema/검증 + Action Plan 생성 | ✅ 완료 |
 | 3-3 | Action Plan 조회·Action 수정/삭제 + Flutter 확인 화면 | ✅ 완료 |
-| 3-4 | 승인·Execute API + 멱등 실행 + Row Lock/단일 Transaction | ⏭ 다음 |
-| 3-5 | 품목 후보 검색·미확정 처리 + 사용자 승인 ItemAlias 저장 | 대기 |
+| 3-4 | 승인·Execute API + 멱등 실행 + Row Lock/단일 Transaction | ✅ 완료 |
+| 3-5 | 품목 후보 검색·미확정 처리 + 사용자 승인 ItemAlias 저장 | ⏭ 다음 |
 
 ### 20.2 Phase 3-1 구현 결과
 
@@ -1267,6 +1267,56 @@ Flutter:
 - 실제 PostgreSQL Integration Test는 `TEST_DATABASE_URL` 미설정으로 Skip했다.
 - 실제 OpenAI 생성과 운영 쓰기 API는 호출하지 않았다.
 
-다음 3-4는 `waiting_confirmation` Plan을 명시적으로 승인하고 Execute한다. 모든
-Action을 최신 Snapshot Row Lock 아래 InventoryEvent로 변환하고 Snapshot·Audit와
-함께 하나의 Transaction으로 Commit하며, 같은 Plan의 중복 실행을 차단한다.
+### 20.7 Phase 3-4 Action Plan 승인·실행
+
+`POST /api/v1/action-plan/{request_id}/execute`
+
+Request Body는 없다. Flutter 확인 화면에서 사용자가 최종 확인 Dialog의 `반영`을
+누르는 행위가 명시적 승인이다. 클라이언트가 Action 목록을 다시 보내지 않고 서버에
+저장된 최신 Plan만 실행하므로, 검증 뒤 payload가 바뀌거나 임의 값이 주입되는 경로를
+만들지 않았다.
+
+처리 순서와 Transaction 경계:
+
+1. 하나의 Transaction에서 VoiceRequest, ActionPlan 순서로 Row Lock을 획득한다.
+2. 이미 `executed=true`이면 아무것도 쓰지 않고 멱등 성공을 반환한다.
+3. 미확정 Action, 신규 품목, 정규화되지 않은 수량이 없는지 확인한다.
+4. 대상 품목 UUID를 정렬한 뒤 모든 Inventory Snapshot Row를 그 순서대로 Lock한다.
+5. 최신 활성 상태·Household·공식 이름·기본 단위와 Action 순서 기준 음수 재고를 다시
+   검증한다.
+6. `stock_in`/`stock_out`은 그대로 Event로 만들고, `set_quantity`는 최신 Snapshot과의
+   차이를 `adjustment_in`/`adjustment_out`으로 변환한다. 목표와 현재가 같으면 Event를
+   만들지 않는다.
+7. `source=voice` InventoryEvent, Snapshot, Event Audit, Plan 승인 Audit,
+   `approved=true`, `executed=true`, VoiceRequest `completed`를 모두 같은
+   Transaction으로 Commit한다. 하나라도 실패하면 전체 Rollback한다.
+
+응답은 `success`, 실제 Snapshot 변경 여부 `inventory_updated`, 생성 Event 수
+`event_count`, 재실행 여부 `already_executed`를 반환한다. 첫 실행 후 같은 POST를 다시
+보내면 `already_executed=true`, `event_count=0`이며 Event와 Snapshot을 중복 변경하지
+않는다. 동시 요청도 VoiceRequest/Plan Row Lock으로 직렬화된다.
+
+거부 조건:
+
+- Plan/VoiceRequest 없음 또는 다른 Household: 기존 `404` 공통 오류.
+- 확인 대기 상태가 아니거나 승인만 된 비정상 상태: `409 ACTION_PLAN_NOT_EDITABLE`.
+- 미확정·신규 품목·비활성 품목·단위 불일치·실행 시점 음수 재고:
+  이슈 목록을 포함한 `422 ACTION_PLAN_INVALID`.
+
+Flutter는 실행 전 확인 Dialog를 표시하고 요청 중 버튼을 잠근다. 성공하면 완료
+상태와 생성 Event 수를 표시하고 재고 목록·대상 상세·기록 Provider를 무효화해 최신
+Snapshot과 Event를 다시 읽는다.
+
+검증(2026-07-28):
+
+- Backend `uv run pytest` → **110 passed, 14 skipped**. 새 실행 서비스 단위 테스트는
+  통과했으며, 실제 PostgreSQL Transaction 통합 테스트는 저장소에 추가했지만 현재
+  `TEST_DATABASE_URL` 미설정으로 Skip됐다.
+- Backend Ruff 통과, Mypy app 53개 Source File 이슈 0.
+- Flutter `flutter analyze` → 이슈 0.
+- Flutter `flutter test` → 전체 통과.
+- `git diff --check` 통과.
+
+다음 3-5는 신규/미확정 품목 후보를 사용자가 기존 품목에 연결하거나 생성 승인하는
+흐름과, 그 승인을 근거로 ItemAlias를 저장하는 범위다. 현재 Execute는 이 입력들이
+미확정인 Plan을 실행하지 않는다.

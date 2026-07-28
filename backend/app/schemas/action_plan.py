@@ -160,6 +160,13 @@ class ActionPlanResponse(BaseModel):
     created_at: datetime
 
 
+class ActionPlanExecutionResponse(BaseModel):
+    success: Literal[True] = True
+    inventory_updated: bool
+    event_count: int = Field(ge=0)
+    already_executed: bool
+
+
 class ActionPlanActionUpdate(BaseModel):
     type: Literal["stock_in", "stock_out", "set_quantity"]
     item_id: UUID

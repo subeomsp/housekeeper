@@ -7,6 +7,7 @@ from httpx import AsyncClient
 
 from app.schemas.action_plan import ActionPlanPayload
 from app.services.action_plan_service import (
+    ActionPlanExecutionView,
     ActionPlanService,
     ActionPlanView,
     get_action_plan_service,
@@ -114,6 +115,32 @@ async def test_delete_action_returns_remaining_plan(
 
     assert response.status_code == 200
     service.delete_action.assert_awaited_once()
+
+
+async def test_execute_action_plan_returns_idempotency_result(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    service = MagicMock(spec=ActionPlanService)
+    service.execute = AsyncMock(
+        return_value=ActionPlanExecutionView(
+            inventory_updated=True,
+            event_count=2,
+            already_executed=False,
+        )
+    )
+    app.dependency_overrides[get_action_plan_service] = lambda: service
+
+    response = await client.post(f"/api/v1/action-plan/{REQUEST_ID}/execute")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": True,
+        "inventory_updated": True,
+        "event_count": 2,
+        "already_executed": False,
+    }
+    service.execute.assert_awaited_once()
 
 
 async def test_stock_change_rejects_zero_quantity(client: AsyncClient) -> None:

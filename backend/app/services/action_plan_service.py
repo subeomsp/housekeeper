@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,16 +17,21 @@ from app.core.exceptions import (
     voice_request_not_found_error,
     voice_request_not_plannable_error,
 )
-from app.models import ActionPlan, VoiceRequest
+from app.models import ActionPlan, InventoryEvent, VoiceRequest
 from app.providers import (
     InventoryPlannerProvider,
     PlannerNotConfiguredError,
     PlannerProviderError,
 )
 from app.repositories.action_plan_repository import ActionPlanRepository
+from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.inventory_event_repository import InventoryEventRepository
 from app.repositories.inventory_item_repository import (
     InventoryItemRepository,
     PlannerInventoryRecord,
+)
+from app.repositories.inventory_repository import (
+    InventoryRepository,
 )
 from app.repositories.voice_request_repository import VoiceRequestRepository
 from app.schemas.action_plan import (
@@ -48,6 +53,13 @@ class ActionPlanView:
     approved: bool
     executed: bool
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class ActionPlanExecutionView:
+    inventory_updated: bool
+    event_count: int
+    already_executed: bool
 
 
 @dataclass(frozen=True)
@@ -217,11 +229,19 @@ class ActionPlanService:
         action_plan_repository: ActionPlanRepository,
         inventory_item_repository: InventoryItemRepository,
         validator: ActionPlanValidator,
+        inventory_repository: InventoryRepository | None = None,
+        inventory_event_repository: InventoryEventRepository | None = None,
+        audit_log_repository: AuditLogRepository | None = None,
     ) -> None:
         self.voice_request_repository = voice_request_repository
         self.action_plan_repository = action_plan_repository
         self.inventory_item_repository = inventory_item_repository
         self.validator = validator
+        self.inventory_repository = inventory_repository or InventoryRepository()
+        self.inventory_event_repository = (
+            inventory_event_repository or InventoryEventRepository()
+        )
+        self.audit_log_repository = audit_log_repository or AuditLogRepository()
 
     async def generate(
         self,
@@ -495,6 +515,191 @@ class ActionPlanService:
                 action_plan=action_plan,
             )
             return self._to_view(action_plan)
+
+    async def execute(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        user_id: UUID,
+        request_id: UUID,
+    ) -> ActionPlanExecutionView:
+        async with session.begin():
+            # All mutation paths use the same lock order: request, plan, then
+            # inventory snapshots sorted by item ID.
+            voice_request = await self._get_request(
+                session,
+                request_id=request_id,
+                household_id=household_id,
+                for_update=True,
+            )
+            action_plan = await self._get_plan(
+                session,
+                request_id=request_id,
+                household_id=household_id,
+                for_update=True,
+            )
+            if action_plan.executed:
+                return ActionPlanExecutionView(
+                    inventory_updated=False,
+                    event_count=0,
+                    already_executed=True,
+                )
+            if voice_request.status != "waiting_confirmation" or action_plan.approved:
+                raise action_plan_not_editable_error(str(request_id))
+
+            payload = ActionPlanPayload.model_validate(action_plan.payload_json)
+            unresolved_issues = self._execution_readiness_issues(payload)
+            if unresolved_issues:
+                raise action_plan_invalid_error(
+                    [issue.as_detail() for issue in unresolved_issues]
+                )
+
+            item_ids = sorted(
+                {
+                    action.item.matched_item_id
+                    for action in payload.actions
+                    if action.item.matched_item_id is not None
+                },
+                key=str,
+            )
+            locked_records = await self.inventory_repository.get_many_for_update(
+                session,
+                item_ids=item_ids,
+            )
+            planner_records = [
+                PlannerInventoryRecord(
+                    item=record.item,
+                    current_quantity=record.snapshot.quantity,
+                )
+                for record in locked_records
+                if record.item.household_id == household_id and record.item.is_active
+            ]
+            issues = self.validator.validate(
+                payload=payload,
+                transcript=voice_request.transcript or "",
+                inventory_records=planner_records,
+            )
+            if issues:
+                raise action_plan_invalid_error(
+                    [issue.as_detail() for issue in issues]
+                )
+
+            records_by_id = {record.item.id: record for record in locked_records}
+            event_count = 0
+            for action in payload.actions:
+                item_id = action.item.matched_item_id
+                normalized_value = action.quantity.normalized_value
+                if item_id is None or normalized_value is None:
+                    raise RuntimeError("검증된 Action에 실행 수량 또는 품목이 없습니다.")
+                record = records_by_id[item_id]
+                quantity = Decimal(str(normalized_value))
+                event_type: str = action.type
+                signed_quantity = quantity if event_type == "stock_in" else -quantity
+                if event_type == "set_quantity":
+                    signed_quantity = quantity - record.snapshot.quantity
+                    if signed_quantity == 0:
+                        continue
+                    event_type = (
+                        "adjustment_in" if signed_quantity > 0 else "adjustment_out"
+                    )
+
+                event = InventoryEvent(
+                    id=uuid4(),
+                    household_id=household_id,
+                    item_id=item_id,
+                    event_type=event_type,
+                    quantity=abs(signed_quantity),
+                    unit=record.item.default_unit,
+                    signed_quantity=signed_quantity,
+                    created_by=user_id,
+                    source="voice",
+                    note=None,
+                )
+                await self.inventory_event_repository.add(session, event=event)
+                record.snapshot.quantity += signed_quantity
+                await self.audit_log_repository.add(
+                    session,
+                    household_id=household_id,
+                    user_id=user_id,
+                    action="inventory_event_created",
+                    target_type="inventory_event",
+                    target_id=event.id,
+                    before_json=None,
+                    after_json={
+                        "action_plan_id": str(action_plan.id),
+                        "voice_request_id": str(request_id),
+                        "action_id": action.action_id,
+                        "item_id": str(item_id),
+                        "event_type": event_type,
+                        "quantity": str(event.quantity),
+                        "signed_quantity": str(event.signed_quantity),
+                        "unit": event.unit,
+                        "source": event.source,
+                    },
+                )
+                event_count += 1
+
+            for record in locked_records:
+                await self.inventory_repository.save_snapshot(
+                    session,
+                    snapshot=record.snapshot,
+                )
+
+            action_plan.approved = True
+            action_plan.executed = True
+            voice_request.status = "completed"
+            await self.action_plan_repository.save(
+                session,
+                action_plan=action_plan,
+            )
+            await self.voice_request_repository.save(
+                session,
+                voice_request=voice_request,
+            )
+            await self.audit_log_repository.add(
+                session,
+                household_id=household_id,
+                user_id=user_id,
+                action="action_plan_approved",
+                target_type="action_plan",
+                target_id=action_plan.id,
+                before_json={"approved": False, "executed": False},
+                after_json={
+                    "approved": True,
+                    "executed": True,
+                    "voice_request_id": str(request_id),
+                    "event_count": event_count,
+                },
+            )
+
+        return ActionPlanExecutionView(
+            inventory_updated=event_count > 0,
+            event_count=event_count,
+            already_executed=False,
+        )
+
+    @staticmethod
+    def _execution_readiness_issues(
+        payload: ActionPlanPayload,
+    ) -> list[PlanValidationIssue]:
+        issues: list[PlanValidationIssue] = []
+        for action in payload.actions:
+            if (
+                action.requires_user_input
+                or action.item.is_new_item
+                or action.item.matched_item_id is None
+                or action.quantity.normalized_value is None
+                or action.quantity.normalized_unit is None
+            ):
+                issues.append(
+                    PlanValidationIssue(
+                        code="ACTION_REQUIRES_INPUT",
+                        message="사용자 확인이 끝나지 않은 Action은 실행할 수 없습니다.",
+                        action_id=action.action_id,
+                    )
+                )
+        return issues
 
     async def _get_request(
         self,

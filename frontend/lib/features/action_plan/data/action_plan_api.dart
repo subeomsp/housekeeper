@@ -72,4 +72,15 @@ class ActionPlanApi {
       throw mapDioError(error);
     }
   }
+
+  Future<ActionPlanExecutionResult> executePlan(String requestId) async {
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/action-plan/$requestId/execute',
+      );
+      return ActionPlanExecutionResult.fromJson(response.data ?? const {});
+    } on DioException catch (error) {
+      throw mapDioError(error);
+    }
+  }
 }

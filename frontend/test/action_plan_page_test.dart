@@ -8,7 +8,7 @@ import 'package:voice_inventory/features/action_plan/presentation/action_plan_pa
 import 'package:voice_inventory/features/action_plan/presentation/action_plan_providers.dart';
 
 void main() {
-  testWidgets('shows transcript, warnings, confidence, and disabled execute', (
+  testWidgets('shows transcript, warnings, confidence, and execute action', (
     tester,
   ) async {
     final plan = _plan(
@@ -29,10 +29,7 @@ void main() {
     expect(find.text('수정 필요'), findsOneWidget);
     expect(find.text('단위를 확인해 주세요.'), findsOneWidget);
     expect(find.textContaining('신뢰도: 높음'), findsOneWidget);
-    final execute = tester.widget<FilledButton>(
-      find.widgetWithText(FilledButton, '반영 — 다음 단계에서 연결'),
-    );
-    expect(execute.onPressed, isNull);
+    expect(find.widgetWithText(FilledButton, '재고에 반영'), findsOneWidget);
   });
 
   testWidgets('deletes one action after confirmation', (tester) async {
@@ -55,6 +52,25 @@ void main() {
 
     expect(api.deletedActionId, 'a1');
     expect(find.text('Action을 삭제했어요.'), findsOneWidget);
+  });
+
+  testWidgets('confirms and executes plan once', (tester) async {
+    final plan = _plan(actions: [_action(actionId: 'a1')]);
+    final api = _FakeActionPlanApi(plan);
+    await tester.pumpWidget(_app(plan: plan, api: api));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(FilledButton, '재고에 반영'));
+    await tester.pumpAndSettle();
+    expect(find.text('재고에 반영할까요?'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, '반영'));
+    await tester.pumpAndSettle();
+
+    expect(api.executeCalls, 1);
+    expect(find.text('재고 반영을 완료했습니다.'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '반영 완료'), findsOneWidget);
+    expect(find.text('재고 기록 1건을 반영했어요.'), findsOneWidget);
   });
 }
 
@@ -116,6 +132,7 @@ class _FakeActionPlanApi extends ActionPlanApi {
 
   final ActionPlan plan;
   String? deletedActionId;
+  int executeCalls = 0;
 
   @override
   Future<ActionPlan> deleteAction({
@@ -124,5 +141,15 @@ class _FakeActionPlanApi extends ActionPlanApi {
   }) async {
     deletedActionId = actionId;
     return plan;
+  }
+
+  @override
+  Future<ActionPlanExecutionResult> executePlan(String requestId) async {
+    executeCalls += 1;
+    return const ActionPlanExecutionResult(
+      inventoryUpdated: true,
+      eventCount: 1,
+      alreadyExecuted: false,
+    );
   }
 }

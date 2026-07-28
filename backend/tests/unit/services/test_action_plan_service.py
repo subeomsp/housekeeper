@@ -1,23 +1,29 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import TracebackType
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
-from app.models import ActionPlan, InventoryItem, VoiceRequest
+from app.models import ActionPlan, Inventory, InventoryEvent, InventoryItem, VoiceRequest
 from app.providers import (
     InventoryPlannerProvider,
     PlannerProviderError,
     UnconfiguredInventoryPlannerProvider,
 )
 from app.repositories.action_plan_repository import ActionPlanRepository
+from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.inventory_event_repository import InventoryEventRepository
 from app.repositories.inventory_item_repository import (
     InventoryItemRepository,
     PlannerInventoryRecord,
+)
+from app.repositories.inventory_repository import (
+    CurrentInventoryRecord,
+    InventoryRepository,
 )
 from app.repositories.voice_request_repository import VoiceRequestRepository
 from app.schemas.action_plan import (
@@ -32,6 +38,7 @@ REQUEST_ID = UUID("00000000-0000-4000-8000-000000000501")
 PLAN_ID = UUID("00000000-0000-4000-8000-000000000601")
 ITEM_ID = UUID("00000000-0000-4000-8000-000000000111")
 CREATED_AT = datetime(2026, 7, 28, 13, 0, tzinfo=UTC)
+USER_ID = UUID("00000000-0000-4000-8000-000000000222")
 
 
 class FakeTransaction:
@@ -151,6 +158,67 @@ class FakeInventoryItemRepository(InventoryItemRepository):
                 current_quantity=Decimal("1"),
             )
         ]
+
+
+class FakeInventoryRepository(InventoryRepository):
+    def __init__(self) -> None:
+        self.record = CurrentInventoryRecord(
+            snapshot=Inventory(
+                household_id=HOUSEHOLD_ID,
+                item_id=ITEM_ID,
+                quantity=Decimal("1"),
+            ),
+            item=InventoryItem(
+                id=ITEM_ID,
+                household_id=HOUSEHOLD_ID,
+                name="우유",
+                normalized_name="우유",
+                default_unit="개",
+                is_active=True,
+            ),
+        )
+        self.locked_item_ids: list[UUID] = []
+
+    async def get_many_for_update(
+        self,
+        session: AsyncSession,
+        *,
+        item_ids: list[UUID],
+    ) -> list[CurrentInventoryRecord]:
+        del session
+        self.locked_item_ids = item_ids
+        return [self.record]
+
+    async def save_snapshot(
+        self,
+        session: AsyncSession,
+        *,
+        snapshot: Inventory,
+    ) -> None:
+        del session, snapshot
+
+
+class FakeInventoryEventRepository(InventoryEventRepository):
+    def __init__(self) -> None:
+        self.events: list[InventoryEvent] = []
+
+    async def add(
+        self,
+        session: AsyncSession,
+        *,
+        event: InventoryEvent,
+    ) -> None:
+        del session
+        self.events.append(event)
+
+
+class FakeAuditLogRepository:
+    def __init__(self) -> None:
+        self.actions: list[str] = []
+
+    async def add(self, session: AsyncSession, **kwargs: Any) -> None:
+        del session
+        self.actions.append(cast(str, kwargs["action"]))
 
 
 class FakePlanner:
@@ -373,3 +441,55 @@ async def test_delete_removes_only_selected_action() -> None:
     )
 
     assert [action.action_id for action in result.payload.actions] == ["a2"]
+
+
+async def test_execute_updates_snapshot_and_is_idempotent() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+    inventory_repository = FakeInventoryRepository()
+    event_repository = FakeInventoryEventRepository()
+    audit_repository = FakeAuditLogRepository()
+    service = ActionPlanService(
+        voice_request_repository=voice_repository,
+        action_plan_repository=plan_repository,
+        inventory_item_repository=FakeInventoryItemRepository(),
+        validator=ActionPlanValidator(),
+        inventory_repository=inventory_repository,
+        inventory_event_repository=event_repository,
+        audit_log_repository=cast(AuditLogRepository, audit_repository),
+    )
+    session = cast(AsyncSession, FakeSession())
+    await service.generate(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        provider=cast(InventoryPlannerProvider, FakePlanner()),
+    )
+
+    first = await service.execute(
+        session,
+        household_id=HOUSEHOLD_ID,
+        user_id=USER_ID,
+        request_id=REQUEST_ID,
+    )
+    second = await service.execute(
+        session,
+        household_id=HOUSEHOLD_ID,
+        user_id=USER_ID,
+        request_id=REQUEST_ID,
+    )
+
+    assert inventory_repository.locked_item_ids == [ITEM_ID]
+    assert inventory_repository.record.snapshot.quantity == 3
+    assert len(event_repository.events) == 1
+    assert event_repository.events[0].event_type == "stock_in"
+    assert event_repository.events[0].source == "voice"
+    assert audit_repository.actions == [
+        "inventory_event_created",
+        "action_plan_approved",
+    ]
+    assert first.event_count == 1
+    assert first.already_executed is False
+    assert second.event_count == 0
+    assert second.already_executed is True
+    assert voice_repository.request.status == "completed"

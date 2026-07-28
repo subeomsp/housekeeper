@@ -105,6 +105,27 @@ class InventoryRepository:
             return None
         return CurrentInventoryRecord(snapshot=row[0], item=row[1])
 
+    async def get_many_for_update(
+        self,
+        session: AsyncSession,
+        *,
+        item_ids: list[UUID],
+    ) -> list[CurrentInventoryRecord]:
+        if not item_ids:
+            return []
+        rows = (
+            await session.execute(
+                select(Inventory, InventoryItem)
+                .join(InventoryItem, InventoryItem.id == Inventory.item_id)
+                .where(Inventory.item_id.in_(item_ids))
+                .order_by(Inventory.item_id.asc())
+                .with_for_update(of=Inventory)
+            )
+        ).all()
+        return [
+            CurrentInventoryRecord(snapshot=row[0], item=row[1]) for row in rows
+        ]
+
     async def save_snapshot(
         self,
         session: AsyncSession,

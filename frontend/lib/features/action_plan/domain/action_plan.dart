@@ -179,3 +179,23 @@ class ActionPlan {
     );
   }
 }
+
+class ActionPlanExecutionResult {
+  const ActionPlanExecutionResult({
+    required this.inventoryUpdated,
+    required this.eventCount,
+    required this.alreadyExecuted,
+  });
+
+  final bool inventoryUpdated;
+  final int eventCount;
+  final bool alreadyExecuted;
+
+  factory ActionPlanExecutionResult.fromJson(Map<String, dynamic> json) {
+    return ActionPlanExecutionResult(
+      inventoryUpdated: json['inventory_updated'] as bool,
+      eventCount: json['event_count'] as int,
+      alreadyExecuted: json['already_executed'] as bool,
+    );
+  }
+}

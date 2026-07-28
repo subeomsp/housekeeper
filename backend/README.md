@@ -9,9 +9,9 @@ Phase 1 inventory APIs are complete and deployed. Phase 3 is now in progress: th
 Action Plan, and Item Alias persistence foundation is implemented, together with a temporary text
 Transcript entry API. Action Plan generation is available through a provider-neutral Planner
 interface with an OpenAI Responses API adapter and strict Structured Output validation. Review,
-editing, approval, and execution are intentionally separate follow-up slices. Mutations still follow
-the Phase 1 Event/Snapshot transaction rules, and neither text entry nor Plan generation changes
-inventory.
+editing, approval, and idempotent execution are connected. Mutations follow the Phase 1
+Event/Snapshot transaction rules, and neither text entry nor Plan generation changes inventory
+before explicit approval.
 
 ## Requirements
 
@@ -94,6 +94,7 @@ POST   /api/v1/voice-requests/{request_id}/action-plan
 GET    /api/v1/action-plan/{request_id}
 PATCH  /api/v1/action-plan/{request_id}/actions/{action_id}
 DELETE /api/v1/action-plan/{request_id}/actions/{action_id}
+POST   /api/v1/action-plan/{request_id}/execute
 ```
 
 Item creation normalizes the item name, rejects Household-level duplicates, and creates its
@@ -167,7 +168,15 @@ positive. The last Action cannot be deleted because an Action Plan must remain n
 
 Plan edits and deletions never create Inventory Events or update Inventory Snapshots. The Plan
 summary becomes a neutral confirmed-action count after an edit so an AI-generated quantity summary
-cannot become stale. Approval and execution remain a separate Phase 3 slice.
+cannot become stale.
+
+Action Plan execution takes no client payload and treats the POST itself as explicit approval. In
+one transaction it locks the Voice Request and Plan, then locks all target Snapshot rows in sorted
+item-ID order. It revalidates the stored Plan against current active Household items and quantities,
+creates `voice`-sourced Events, updates Snapshots, writes Event and Plan approval audits, and marks
+the Plan executed and Voice Request completed. `set_quantity` becomes an adjustment Event for the
+difference; a no-op target creates no Event. Repeating or concurrently submitting an already
+executed Plan succeeds without creating duplicate Events.
 
 Set `OPENAI_API_KEY` outside source control to enable the OpenAI adapter. `LLM_PROVIDER` defaults to
 `openai`, and `OPENAI_MODEL` defaults to `gpt-5.6-sol` but can be overridden. Without a key the

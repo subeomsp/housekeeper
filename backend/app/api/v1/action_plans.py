@@ -3,8 +3,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends
 
-from app.api.dependencies import CurrentHouseholdId, DatabaseSession
-from app.schemas.action_plan import ActionPlanActionUpdate, ActionPlanResponse
+from app.api.dependencies import CurrentHouseholdId, CurrentUserId, DatabaseSession
+from app.schemas.action_plan import (
+    ActionPlanActionUpdate,
+    ActionPlanExecutionResponse,
+    ActionPlanResponse,
+)
 from app.services.action_plan_service import (
     ActionPlanService,
     ActionPlanView,
@@ -73,6 +77,30 @@ async def delete_action_plan_action(
         action_id=action_id,
     )
     return _response(result)
+
+
+@router.post(
+    "/{request_id}/execute",
+    response_model=ActionPlanExecutionResponse,
+)
+async def execute_action_plan(
+    request_id: UUID,
+    session: DatabaseSession,
+    household_id: CurrentHouseholdId,
+    user_id: CurrentUserId,
+    service: ActionPlanServiceDependency,
+) -> ActionPlanExecutionResponse:
+    result = await service.execute(
+        session,
+        household_id=household_id,
+        user_id=user_id,
+        request_id=request_id,
+    )
+    return ActionPlanExecutionResponse(
+        inventory_updated=result.inventory_updated,
+        event_count=result.event_count,
+        already_executed=result.already_executed,
+    )
 
 
 def _response(result: ActionPlanView) -> ActionPlanResponse:

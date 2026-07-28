@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../../../core/errors/api_exception.dart';
 import '../../../core/format/quantity_format.dart';
 import '../../../core/widgets/async_view.dart';
+import '../../history/presentation/history_providers.dart';
+import '../../inventory/presentation/inventory_providers.dart';
 import '../domain/action_plan.dart';
 import 'action_plan_edit_sheet.dart';
 import 'action_plan_providers.dart';
@@ -20,6 +22,8 @@ class ActionPlanPage extends ConsumerStatefulWidget {
 
 class _ActionPlanPageState extends ConsumerState<ActionPlanPage> {
   String? _mutatingActionId;
+  bool _executing = false;
+  ActionPlanExecutionResult? _executionResult;
 
   void _refresh() => ref.invalidate(actionPlanProvider(widget.requestId));
 
@@ -115,6 +119,69 @@ class _ActionPlanPageState extends ConsumerState<ActionPlanPage> {
     }
   }
 
+  Future<void> _execute(ActionPlan plan) async {
+    if (_executing || _mutatingActionId != null || plan.executed) return;
+    if (plan.actions.any((action) => action.requiresUserInput)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('수정이 필요한 Action을 먼저 확인해 주세요.')),
+      );
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('재고에 반영할까요?'),
+        content: Text(
+          '${plan.actions.length}개의 Action을 순서대로 실행합니다. '
+          '실행 결과는 재고 기록에 남습니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('돌아가기'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('반영'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _executing = true);
+    try {
+      final result = await ref
+          .read(actionPlanApiProvider)
+          .executePlan(widget.requestId);
+      if (!mounted) return;
+      setState(() => _executionResult = result);
+      _refresh();
+      ref.invalidate(inventoryListProvider);
+      ref.invalidate(historyItemsProvider);
+      ref.invalidate(historyPageProvider);
+      for (final action in plan.actions) {
+        final itemId = action.item.matchedItemId;
+        if (itemId != null) ref.invalidate(inventoryDetailProvider(itemId));
+      }
+      final message = result.alreadyExecuted
+          ? '이미 반영된 Plan이에요. 재고를 중복 변경하지 않았습니다.'
+          : result.eventCount == 0
+          ? '현재 수량과 같아 새 기록 없이 반영을 완료했어요.'
+          : '재고 기록 ${result.eventCount}건을 반영했어요.';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } on ApiException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } finally {
+      if (mounted) setState(() => _executing = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final planAsync = ref.watch(actionPlanProvider(widget.requestId));
@@ -132,53 +199,80 @@ class _ActionPlanPageState extends ConsumerState<ActionPlanPage> {
       body: AsyncView<ActionPlan>(
         value: planAsync,
         onRetry: _refresh,
-        onData: (plan) => ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Text(
-              '이렇게 이해했습니다.',
-              style: Theme.of(context).textTheme.headlineSmall,
-            ),
-            const SizedBox(height: 12),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '원본 Transcript',
-                      style: Theme.of(context).textTheme.labelLarge,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(plan.transcript),
-                    const SizedBox(height: 12),
-                    Text(
-                      plan.summary,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
+        onData: (plan) {
+          final completed = plan.executed || _executionResult != null;
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(
+                '이렇게 이해했습니다.',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 12),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '원본 Transcript',
+                        style: Theme.of(context).textTheme.labelLarge,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(plan.transcript),
+                      const SizedBox(height: 12),
+                      Text(
+                        plan.summary,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 8),
-            ...plan.actions.map(
-              (action) => _ActionCard(
-                action: action,
-                mutating: _mutatingActionId == action.actionId,
-                onEdit: () => _edit(action),
-                onDelete: () => _delete(plan, action),
+              const SizedBox(height: 8),
+              if (completed)
+                Card(
+                  color: Theme.of(context).colorScheme.primaryContainer,
+                  child: const ListTile(
+                    leading: Icon(Icons.check_circle_outline),
+                    title: Text('재고 반영을 완료했습니다.'),
+                  ),
+                ),
+              ...plan.actions.map(
+                (action) => _ActionCard(
+                  action: action,
+                  mutating: _mutatingActionId == action.actionId,
+                  onEdit: completed || _executing ? null : () => _edit(action),
+                  onDelete: completed || _executing
+                      ? null
+                      : () => _delete(plan, action),
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            OutlinedButton(
-              onPressed: _mutatingActionId == null ? _cancel : null,
-              child: const Text('전체 취소'),
-            ),
-            const SizedBox(height: 8),
-            FilledButton(onPressed: null, child: const Text('반영 — 다음 단계에서 연결')),
-          ],
-        ),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                onPressed:
+                    _mutatingActionId == null && !_executing && !completed
+                    ? _cancel
+                    : null,
+                child: const Text('전체 취소'),
+              ),
+              const SizedBox(height: 8),
+              FilledButton(
+                onPressed:
+                    _mutatingActionId == null && !_executing && !completed
+                    ? () => _execute(plan)
+                    : null,
+                child: _executing
+                    ? const SizedBox.square(
+                        dimension: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(completed ? '반영 완료' : '재고에 반영'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -194,8 +288,8 @@ class _ActionCard extends StatelessWidget {
 
   final ActionPlanAction action;
   final bool mutating;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {

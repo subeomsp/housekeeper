@@ -6,10 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     ActionPlan,
+    AuditLog,
     Household,
     Inventory,
     InventoryEvent,
     InventoryItem,
+    User,
     VoiceRequest,
 )
 from app.repositories.action_plan_repository import ActionPlanRepository
@@ -26,12 +28,14 @@ from app.services.voice_request_service import VoiceRequestService
 
 HOUSEHOLD_ID = UUID("00000000-0000-4000-8000-0000000005a1")
 ITEM_ID = UUID("00000000-0000-4000-8000-0000000005a2")
+USER_ID = UUID("00000000-0000-4000-8000-0000000005a3")
 
 
 @pytest.fixture
 async def household(db_session: AsyncSession) -> UUID:
     async with db_session.begin():
         db_session.add(Household(id=HOUSEHOLD_ID, name="우리 집"))
+        db_session.add(User(id=USER_ID, nickname="테스터"))
         await db_session.flush()
         db_session.add(
             InventoryItem(
@@ -184,3 +188,97 @@ async def test_action_plan_is_saved_without_inventory_mutation(
     assert unchanged_snapshot is not None
     assert unchanged_snapshot.quantity == 5
     assert unchanged_event_count == 0
+
+
+async def test_edited_plan_executes_once_with_event_snapshot_and_audit(
+    db_session: AsyncSession,
+    household: UUID,
+) -> None:
+    request = await VoiceRequestService(VoiceRequestRepository()).create_text_request(
+        db_session,
+        household_id=household,
+        data=TextVoiceRequestCreate(transcript="우유 두 개 사왔어."),
+    )
+    service = ActionPlanService(
+        voice_request_repository=VoiceRequestRepository(),
+        action_plan_repository=ActionPlanRepository(),
+        inventory_item_repository=InventoryItemRepository(),
+        validator=ActionPlanValidator(),
+    )
+    await service.generate(
+        db_session,
+        household_id=household,
+        request_id=request.request_id,
+        provider=FakePlanner(),
+    )
+    await service.update_action(
+        db_session,
+        household_id=household,
+        request_id=request.request_id,
+        action_id="a1",
+        data=ActionPlanActionUpdate(
+            type="set_quantity",
+            item_id=ITEM_ID,
+            quantity=2,
+            unit="개",
+        ),
+    )
+
+    first = await service.execute(
+        db_session,
+        household_id=household,
+        user_id=USER_ID,
+        request_id=request.request_id,
+    )
+    second = await service.execute(
+        db_session,
+        household_id=household,
+        user_id=USER_ID,
+        request_id=request.request_id,
+    )
+
+    snapshot = await db_session.scalar(
+        select(Inventory).where(Inventory.item_id == ITEM_ID)
+    )
+    events = list(
+        (
+            await db_session.scalars(
+                select(InventoryEvent).where(InventoryEvent.item_id == ITEM_ID)
+            )
+        ).all()
+    )
+    stored_plan = await db_session.scalar(
+        select(ActionPlan).where(ActionPlan.voice_request_id == request.request_id)
+    )
+    stored_request = await db_session.scalar(
+        select(VoiceRequest).where(VoiceRequest.id == request.request_id)
+    )
+    audits = list(
+        (
+            await db_session.scalars(
+                select(AuditLog).where(AuditLog.household_id == household)
+            )
+        ).all()
+    )
+
+    assert first.inventory_updated is True
+    assert first.event_count == 1
+    assert first.already_executed is False
+    assert second.inventory_updated is False
+    assert second.event_count == 0
+    assert second.already_executed is True
+    assert snapshot is not None
+    assert snapshot.quantity == 2
+    assert len(events) == 1
+    assert events[0].event_type == "adjustment_out"
+    assert events[0].signed_quantity == -3
+    assert events[0].source == "voice"
+    assert stored_plan is not None
+    assert stored_plan.approved is True
+    assert stored_plan.executed is True
+    assert stored_request is not None
+    assert stored_request.status == "completed"
+    assert {audit.action for audit in audits} == {
+        "inventory_event_created",
+        "action_plan_approved",
+    }
