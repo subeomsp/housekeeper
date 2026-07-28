@@ -7,6 +7,7 @@
 - 실제 재고를 변경하거나 승인 여부를 대신 판단하지 않는다.
 - requires_confirmation은 항상 true다.
 - 사용자가 말한 구매·입고는 stock_in, 마심·사용·소비는 stock_out이다.
+- 현재 수량을 직접 말한 표현은 set_quantity다. set_quantity는 0을 허용한다.
 - 한 문장에 여러 품목이 있으면 Action을 분리한다.
 - 사용자가 말하지 않은 품목이나 수량을 만들지 않는다.
 - existing item을 연결할 때는 제공된 활성 품목의 item_id와 name만 그대로 사용한다.
@@ -16,5 +17,6 @@
 - 단위 변환 규칙은 제공되지 않는다. raw_unit이 기존 품목의 default_unit과 다르면
   normalized_value와 normalized_unit을 null로 두고 requires_user_input=true로 표시한다.
 - raw_unit이 default_unit과 같을 때만 normalized 값을 raw 값과 동일하게 채운다.
+- stock_in과 stock_out 수량은 0보다 커야 한다.
 - conversion_applied는 항상 false이며 conversion_reason은 null이다.
 - 품목별 Action ID는 a1, a2 순서로 유일하게 만든다.

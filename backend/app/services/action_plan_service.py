@@ -6,9 +6,14 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
+    action_plan_action_not_found_error,
     action_plan_invalid_error,
+    action_plan_not_editable_error,
+    action_plan_not_found_error,
     action_plan_provider_error,
+    action_plan_requires_action_error,
     planner_not_configured_error,
+    unit_mismatch_error,
     voice_request_not_found_error,
     voice_request_not_plannable_error,
 )
@@ -25,7 +30,11 @@ from app.repositories.inventory_item_repository import (
 )
 from app.repositories.voice_request_repository import VoiceRequestRepository
 from app.schemas.action_plan import (
+    ActionPlanAction,
+    ActionPlanActionUpdate,
+    ActionPlanItemReference,
     ActionPlanPayload,
+    ActionPlanQuantity,
     PlannerInventoryItem,
 )
 from app.services.inventory_item_service import normalize_item_name
@@ -179,8 +188,13 @@ class ActionPlanValidator:
                 continue
 
             normalized_value = Decimal(str(quantity.normalized_value))
-            signed_quantity = normalized_value if action.type == "stock_in" else -normalized_value
-            next_quantity = running_quantities[item_id] + signed_quantity
+            if action.type == "set_quantity":
+                next_quantity = normalized_value
+            else:
+                signed_quantity = (
+                    normalized_value if action.type == "stock_in" else -normalized_value
+                )
+                next_quantity = running_quantities[item_id] + signed_quantity
             if next_quantity < Decimal("0"):
                 issues.append(
                     PlanValidationIssue(
@@ -335,6 +349,153 @@ class ActionPlanService:
             raise RuntimeError("Action Plan 생성 결과가 없습니다.")
         return created_view
 
+    async def get(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        request_id: UUID,
+    ) -> ActionPlanView:
+        async with session.begin():
+            action_plan = await self._get_plan(
+                session,
+                request_id=request_id,
+                household_id=household_id,
+                for_update=False,
+            )
+            return self._to_view(action_plan)
+
+    async def update_action(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        request_id: UUID,
+        action_id: str,
+        data: ActionPlanActionUpdate,
+    ) -> ActionPlanView:
+        async with session.begin():
+            action_plan = await self._get_editable_plan(
+                session,
+                request_id=request_id,
+                household_id=household_id,
+            )
+            inventory_records = await self.inventory_item_repository.list_active_for_planner(
+                session,
+                household_id=household_id,
+            )
+            record = next(
+                (item for item in inventory_records if item.item.id == data.item_id),
+                None,
+            )
+            if record is None:
+                raise action_plan_invalid_error(
+                    [
+                        PlanValidationIssue(
+                            code="MATCHED_ITEM_INVALID",
+                            message=("선택한 품목이 현재 Household의 활성 품목이 아닙니다."),
+                            action_id=action_id,
+                        ).as_detail()
+                    ]
+                )
+            if data.unit != record.item.default_unit:
+                raise unit_mismatch_error(
+                    str(data.item_id),
+                    record.item.default_unit,
+                    data.unit,
+                )
+
+            payload = ActionPlanPayload.model_validate(action_plan.payload_json)
+            action_index = self._find_action_index(
+                payload,
+                request_id=request_id,
+                action_id=action_id,
+            )
+            updated_action = ActionPlanAction(
+                action_id=action_id,
+                type=data.type,
+                item=ActionPlanItemReference(
+                    raw_name=record.item.name,
+                    matched_item_id=record.item.id,
+                    matched_name=record.item.name,
+                    is_new_item=False,
+                ),
+                quantity=ActionPlanQuantity(
+                    raw_value=data.quantity,
+                    raw_unit=record.item.default_unit,
+                    normalized_value=data.quantity,
+                    normalized_unit=record.item.default_unit,
+                    conversion_applied=False,
+                    conversion_reason=None,
+                ),
+                confidence=1,
+                warnings=[],
+                requires_user_input=False,
+            )
+            actions = list(payload.actions)
+            actions[action_index] = updated_action
+            updated_payload = payload.model_copy(
+                update={
+                    "summary": f"사용자가 확인한 재고 변경 {len(actions)}건",
+                    "actions": actions,
+                }
+            )
+            self._validate_edited_payload(
+                payload=updated_payload,
+                inventory_records=inventory_records,
+            )
+            action_plan.payload_json = updated_payload.model_dump(mode="json")
+            await self.action_plan_repository.save(
+                session,
+                action_plan=action_plan,
+            )
+            return self._to_view(action_plan)
+
+    async def delete_action(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        request_id: UUID,
+        action_id: str,
+    ) -> ActionPlanView:
+        async with session.begin():
+            action_plan = await self._get_editable_plan(
+                session,
+                request_id=request_id,
+                household_id=household_id,
+            )
+            payload = ActionPlanPayload.model_validate(action_plan.payload_json)
+            action_index = self._find_action_index(
+                payload,
+                request_id=request_id,
+                action_id=action_id,
+            )
+            if len(payload.actions) == 1:
+                raise action_plan_requires_action_error(str(request_id))
+            actions = list(payload.actions)
+            actions.pop(action_index)
+            updated_payload = payload.model_copy(
+                update={
+                    "summary": f"사용자가 확인한 재고 변경 {len(actions)}건",
+                    "actions": actions,
+                }
+            )
+            inventory_records = await self.inventory_item_repository.list_active_for_planner(
+                session,
+                household_id=household_id,
+            )
+            self._validate_edited_payload(
+                payload=updated_payload,
+                inventory_records=inventory_records,
+            )
+            action_plan.payload_json = updated_payload.model_dump(mode="json")
+            await self.action_plan_repository.save(
+                session,
+                action_plan=action_plan,
+            )
+            return self._to_view(action_plan)
+
     async def _get_request(
         self,
         session: AsyncSession,
@@ -352,6 +513,79 @@ class ActionPlanService:
         if voice_request is None:
             raise voice_request_not_found_error(str(request_id))
         return voice_request
+
+    async def _get_plan(
+        self,
+        session: AsyncSession,
+        *,
+        request_id: UUID,
+        household_id: UUID,
+        for_update: bool,
+    ) -> ActionPlan:
+        action_plan = await self.action_plan_repository.get_for_household(
+            session,
+            request_id=request_id,
+            household_id=household_id,
+            for_update=for_update,
+        )
+        if action_plan is None:
+            raise action_plan_not_found_error(str(request_id))
+        return action_plan
+
+    async def _get_editable_plan(
+        self,
+        session: AsyncSession,
+        *,
+        request_id: UUID,
+        household_id: UUID,
+    ) -> ActionPlan:
+        # Keep the same lock order as generation and later execution:
+        # VoiceRequest first, then ActionPlan, to avoid cross-flow deadlocks.
+        voice_request = await self._get_request(
+            session,
+            request_id=request_id,
+            household_id=household_id,
+            for_update=True,
+        )
+        action_plan = await self._get_plan(
+            session,
+            request_id=request_id,
+            household_id=household_id,
+            for_update=True,
+        )
+        if (
+            voice_request.status != "waiting_confirmation"
+            or action_plan.approved
+            or action_plan.executed
+        ):
+            raise action_plan_not_editable_error(str(action_plan.voice_request_id))
+        return action_plan
+
+    @staticmethod
+    def _find_action_index(
+        payload: ActionPlanPayload,
+        *,
+        request_id: UUID,
+        action_id: str,
+    ) -> int:
+        for index, action in enumerate(payload.actions):
+            if action.action_id == action_id:
+                return index
+        raise action_plan_action_not_found_error(str(request_id), action_id)
+
+    def _validate_edited_payload(
+        self,
+        *,
+        payload: ActionPlanPayload,
+        inventory_records: list[PlannerInventoryRecord],
+    ) -> None:
+        issues = self.validator.validate(
+            payload=payload,
+            transcript=payload.transcript,
+            inventory_records=inventory_records,
+        )
+        if issues:
+            raise action_plan_invalid_error([issue.as_detail() for issue in issues])
 
     async def _mark_failed(
         self,

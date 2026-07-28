@@ -15,7 +15,11 @@ from app.models import (
 from app.repositories.action_plan_repository import ActionPlanRepository
 from app.repositories.inventory_item_repository import InventoryItemRepository
 from app.repositories.voice_request_repository import VoiceRequestRepository
-from app.schemas.action_plan import ActionPlanPayload, PlannerInventoryItem
+from app.schemas.action_plan import (
+    ActionPlanActionUpdate,
+    ActionPlanPayload,
+    PlannerInventoryItem,
+)
 from app.schemas.voice_request import TextVoiceRequestCreate
 from app.services.action_plan_service import ActionPlanService, ActionPlanValidator
 from app.services.voice_request_service import VoiceRequestService
@@ -154,3 +158,29 @@ async def test_action_plan_is_saved_without_inventory_mutation(
     assert inventory_event_count == 0
     assert snapshot is not None
     assert snapshot.quantity == 5
+
+    await db_session.rollback()
+    updated = await service.update_action(
+        db_session,
+        household_id=household,
+        request_id=request.request_id,
+        action_id="a1",
+        data=ActionPlanActionUpdate(
+            type="set_quantity",
+            item_id=ITEM_ID,
+            quantity=0,
+            unit="개",
+        ),
+    )
+
+    assert updated.payload.actions[0].type == "set_quantity"
+    assert updated.payload.actions[0].quantity.normalized_value == 0
+    unchanged_snapshot = await db_session.scalar(
+        select(Inventory).where(Inventory.item_id == ITEM_ID)
+    )
+    unchanged_event_count = await db_session.scalar(
+        select(func.count()).select_from(InventoryEvent)
+    )
+    assert unchanged_snapshot is not None
+    assert unchanged_snapshot.quantity == 5
+    assert unchanged_event_count == 0

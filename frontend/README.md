@@ -3,8 +3,8 @@
 Flutter frontend for the Voice Inventory Agent. It talks to the FastAPI backend
 over HTTP; it never touches the database directly.
 
-Phase 2 Flutter 기본 앱은 완료됐다. 전체 프로젝트 상태와 다음 Phase 계획은
-`../HANDOFF.md` (§19)를 먼저 확인한다.
+Phase 2 Flutter 기본 앱과 Phase 3 Action Plan 확인·편집 화면까지 구현됐다. 전체
+프로젝트 상태와 다음 Phase 계획은 `../HANDOFF.md` (§19~20)를 먼저 확인한다.
 
 ## Requirements
 
@@ -24,8 +24,15 @@ Android (Phase 5).
 
 The completed basic app supports inventory list/detail and controls, manual
 stock-in/out, target quantity changes, event correction/cancellation, item
-creation/edit/archive/restore, refresh, and common error states. Phase 3 adds
-text-first Action Plan validation before real voice processing.
+creation/edit/archive/restore, refresh, common error states, and a text-first
+Action Plan generation/confirmation/edit/delete flow before real voice processing.
+
+From Home, `텍스트로 음성 흐름 테스트` submits a temporary Transcript, generates a Plan,
+and opens `/action-plan/:requestId`. The screen shows the original Transcript, warnings,
+confidence, and every Action. An Action can be changed to stock-in, stock-out, or target quantity
+using an active inventory item and its official unit, or deleted when at least one other Action
+remains. The execute button is intentionally disabled until the approval/transaction slice is
+implemented.
 
 ### API server
 

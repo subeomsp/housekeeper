@@ -182,3 +182,39 @@ def action_plan_invalid_error(issues: list[dict[str, str]]) -> AppError:
         status_code=422,
         details={"issues": issues},
     )
+
+
+def action_plan_not_found_error(request_id: str) -> AppError:
+    return AppError(
+        code="ACTION_PLAN_NOT_FOUND",
+        message="Action Plan을 찾을 수 없습니다.",
+        status_code=404,
+        details={"request_id": request_id},
+    )
+
+
+def action_plan_not_editable_error(request_id: str) -> AppError:
+    return AppError(
+        code="ACTION_PLAN_NOT_EDITABLE",
+        message="대기 중인 Action Plan만 수정할 수 있습니다.",
+        status_code=409,
+        details={"request_id": request_id},
+    )
+
+
+def action_plan_action_not_found_error(request_id: str, action_id: str) -> AppError:
+    return AppError(
+        code="ACTION_PLAN_ACTION_NOT_FOUND",
+        message="Action Plan에서 해당 Action을 찾을 수 없습니다.",
+        status_code=404,
+        details={"request_id": request_id, "action_id": action_id},
+    )
+
+
+def action_plan_requires_action_error(request_id: str) -> AppError:
+    return AppError(
+        code="ACTION_PLAN_REQUIRES_ACTION",
+        message="마지막 Action은 삭제할 수 없습니다. 전체 취소를 사용해 주세요.",
+        status_code=409,
+        details={"request_id": request_id},
+    )

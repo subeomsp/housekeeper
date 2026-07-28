@@ -20,7 +20,11 @@ from app.repositories.inventory_item_repository import (
     PlannerInventoryRecord,
 )
 from app.repositories.voice_request_repository import VoiceRequestRepository
-from app.schemas.action_plan import ActionPlanPayload, PlannerInventoryItem
+from app.schemas.action_plan import (
+    ActionPlanActionUpdate,
+    ActionPlanPayload,
+    PlannerInventoryItem,
+)
 from app.services.action_plan_service import ActionPlanService, ActionPlanValidator
 
 HOUSEHOLD_ID = UUID("00000000-0000-4000-8000-000000000099")
@@ -92,6 +96,19 @@ class FakeActionPlanRepository(ActionPlanRepository):
         del session, voice_request_id
         return self.plan
 
+    async def get_for_household(
+        self,
+        session: AsyncSession,
+        *,
+        request_id: UUID,
+        household_id: UUID,
+        for_update: bool = False,
+    ) -> ActionPlan | None:
+        del session, for_update
+        if request_id == REQUEST_ID and household_id == HOUSEHOLD_ID:
+            return self.plan
+        return None
+
     async def add(
         self,
         session: AsyncSession,
@@ -101,6 +118,15 @@ class FakeActionPlanRepository(ActionPlanRepository):
         del session
         action_plan.id = PLAN_ID
         action_plan.created_at = CREATED_AT
+        self.plan = action_plan
+
+    async def save(
+        self,
+        session: AsyncSession,
+        *,
+        action_plan: ActionPlan,
+    ) -> None:
+        del session
         self.plan = action_plan
 
 
@@ -262,3 +288,88 @@ async def test_missing_provider_configuration_returns_service_unavailable() -> N
     assert raised.value.code == "PLANNER_NOT_CONFIGURED"
     assert raised.value.status_code == 503
     assert voice_repository.request.status == "failed"
+
+
+async def test_user_can_replace_action_with_set_quantity_zero() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+    service = build_service(voice_repository, plan_repository)
+    session = cast(AsyncSession, FakeSession())
+    await service.generate(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        provider=cast(InventoryPlannerProvider, FakePlanner()),
+    )
+
+    result = await service.update_action(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        action_id="a1",
+        data=ActionPlanActionUpdate(
+            type="set_quantity",
+            item_id=ITEM_ID,
+            quantity=0,
+            unit="개",
+        ),
+    )
+
+    action = result.payload.actions[0]
+    assert action.type == "set_quantity"
+    assert action.quantity.normalized_value == 0
+    assert action.confidence == 1
+    assert action.requires_user_input is False
+
+
+async def test_last_action_cannot_be_deleted() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+    service = build_service(voice_repository, plan_repository)
+    session = cast(AsyncSession, FakeSession())
+    await service.generate(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        provider=cast(InventoryPlannerProvider, FakePlanner()),
+    )
+
+    with pytest.raises(AppError) as raised:
+        await service.delete_action(
+            session,
+            household_id=HOUSEHOLD_ID,
+            request_id=REQUEST_ID,
+            action_id="a1",
+        )
+
+    assert raised.value.code == "ACTION_PLAN_REQUIRES_ACTION"
+
+
+async def test_delete_removes_only_selected_action() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+    service = build_service(voice_repository, plan_repository)
+    session = cast(AsyncSession, FakeSession())
+    await service.generate(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        provider=cast(InventoryPlannerProvider, FakePlanner()),
+    )
+    assert plan_repository.plan is not None
+    payload = ActionPlanPayload.model_validate(plan_repository.plan.payload_json)
+    second = payload.actions[0].model_copy(
+        update={"action_id": "a2", "type": "set_quantity"}
+    )
+    plan_repository.plan.payload_json = payload.model_copy(
+        update={"actions": [payload.actions[0], second]}
+    ).model_dump(mode="json")
+
+    result = await service.delete_action(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        action_id="a1",
+    )
+
+    assert [action.action_id for action in result.payload.actions] == ["a2"]

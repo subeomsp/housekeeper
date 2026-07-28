@@ -84,9 +84,7 @@ def test_validator_accepts_household_item_and_non_negative_result() -> None:
 
 
 def test_validator_rejects_negative_inventory_at_plan_time() -> None:
-    assert "INSUFFICIENT_INVENTORY" in issue_codes(
-        action_plan(quantity=6, normalized_quantity=6)
-    )
+    assert "INSUFFICIENT_INVENTORY" in issue_codes(action_plan(quantity=6, normalized_quantity=6))
 
 
 def test_validator_requires_confirmation_for_unknown_unit() -> None:
@@ -121,3 +119,13 @@ def test_validator_allows_unmatched_new_item_only_with_user_input() -> None:
     )
 
     assert issue_codes(payload) == set()
+
+
+def test_validator_accepts_set_quantity_zero_without_negative_delta() -> None:
+    payload = action_plan(
+        event_type="set_quantity",
+        quantity=0,
+        normalized_quantity=0,
+    )
+
+    assert issue_codes(payload, quantity="1") == set()

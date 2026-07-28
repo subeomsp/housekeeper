@@ -52,11 +52,11 @@ class ActionPlanItemReference(StrictModel):
 
 
 class ActionPlanQuantity(StrictModel):
-    raw_value: float = Field(gt=0, le=999_999_999.999)
+    raw_value: float = Field(ge=0, le=999_999_999.999)
     raw_unit: str = Field(min_length=1, max_length=20)
     normalized_value: float | None = Field(
         default=None,
-        gt=0,
+        ge=0,
         le=999_999_999.999,
     )
     normalized_unit: str | None = Field(default=None, min_length=1, max_length=20)
@@ -99,7 +99,7 @@ class ActionPlanQuantity(StrictModel):
 
 class ActionPlanAction(StrictModel):
     action_id: str = Field(min_length=1, max_length=50)
-    type: Literal["stock_in", "stock_out"]
+    type: Literal["stock_in", "stock_out", "set_quantity"]
     item: ActionPlanItemReference
     quantity: ActionPlanQuantity
     confidence: float = Field(ge=0, le=1)
@@ -113,6 +113,15 @@ class ActionPlanAction(StrictModel):
         if not stripped:
             raise ValueError("Action ID는 빈 문자열일 수 없습니다.")
         return stripped
+
+    @model_validator(mode="after")
+    def validate_quantity_for_action_type(self) -> "ActionPlanAction":
+        if self.type in {"stock_in", "stock_out"}:
+            if self.quantity.raw_value <= 0:
+                raise ValueError("입고와 소비 수량은 0보다 커야 합니다.")
+            if self.quantity.normalized_value is not None and self.quantity.normalized_value <= 0:
+                raise ValueError("입고와 소비의 정규화 수량은 0보다 커야 합니다.")
+        return self
 
 
 class ActionPlanPayload(StrictModel):
@@ -149,6 +158,32 @@ class ActionPlanResponse(BaseModel):
     approved: bool
     executed: bool
     created_at: datetime
+
+
+class ActionPlanActionUpdate(BaseModel):
+    type: Literal["stock_in", "stock_out", "set_quantity"]
+    item_id: UUID
+    quantity: float = Field(ge=0, le=999_999_999.999)
+    unit: str = Field(min_length=1, max_length=20)
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity_precision(cls, value: float) -> float:
+        return ActionPlanQuantity.validate_quantity_precision(value) or 0
+
+    @field_validator("unit")
+    @classmethod
+    def strip_unit(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("단위는 빈 문자열일 수 없습니다.")
+        return stripped
+
+    @model_validator(mode="after")
+    def validate_quantity_for_action_type(self) -> "ActionPlanActionUpdate":
+        if self.type in {"stock_in", "stock_out"} and self.quantity <= 0:
+            raise ValueError("입고와 소비 수량은 0보다 커야 합니다.")
+        return self
 
 
 class PlannerInventoryItem(BaseModel):

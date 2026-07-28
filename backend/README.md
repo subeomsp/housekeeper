@@ -91,6 +91,9 @@ PATCH  /api/v1/inventory-events/{event_id}
 DELETE /api/v1/inventory-events/{event_id}
 POST   /api/v1/voice-requests/text
 POST   /api/v1/voice-requests/{request_id}/action-plan
+GET    /api/v1/action-plan/{request_id}
+PATCH  /api/v1/action-plan/{request_id}/actions/{action_id}
+DELETE /api/v1/action-plan/{request_id}/actions/{action_id}
 ```
 
 Item creation normalizes the item name, rejects Household-level duplicates, and creates its
@@ -153,6 +156,18 @@ references. It rechecks official names, default units, duplicate Actions, confid
 negative inventory in Action order. Unit conversion rules are not yet persisted: a different raw
 unit must remain unresolved and require user input, while an AI-applied conversion is rejected.
 New or unmatched items also require user input.
+
+The Action Plan read/edit endpoints power the Flutter confirmation screen. Edits accept an active
+item ID, `stock_in`/`stock_out`/`set_quantity`, a quantity, and the item's exact default unit. They
+lock the Voice Request and Action Plan in that order, rebuild the selected Action from current
+official item data, validate the complete Plan against current Snapshots, and save only
+`payload_json` in one transaction. User-confirmed Actions receive confidence `1.0`, no AI warnings,
+and `requires_user_input: false`. `set_quantity` permits zero; stock changes remain strictly
+positive. The last Action cannot be deleted because an Action Plan must remain non-empty.
+
+Plan edits and deletions never create Inventory Events or update Inventory Snapshots. The Plan
+summary becomes a neutral confirmed-action count after an edit so an AI-generated quantity summary
+cannot become stale. Approval and execution remain a separate Phase 3 slice.
 
 Set `OPENAI_API_KEY` outside source control to enable the OpenAI adapter. `LLM_PROVIDER` defaults to
 `openai`, and `OPENAI_MODEL` defaults to `gpt-5.6-sol` but can be overridden. Without a key the

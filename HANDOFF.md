@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1~3-2 Action Plan 생성 Backend 완료**. 다음은 Phase 3-3 Action Plan 조회·수정·삭제와 Flutter 확인 화면이며, 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19~20.
+현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1~3-3 Action Plan 생성·확인·편집 완료**. 다음은 Phase 3-4 승인·Execute Transaction이며, 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19~20.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -1079,8 +1079,8 @@ Snapshot 변경을 만들지 않는다.
 |---|---|---|
 | 3-1 | VoiceRequest·ActionPlan·ItemAlias 모델/Migration + 텍스트 Transcript 접수 API | ✅ 완료 |
 | 3-2 | Planner Provider 경계 + 엄격한 Plan Schema/검증 + Action Plan 생성 | ✅ 완료 |
-| 3-3 | Action Plan 조회·Action 수정/삭제 + Flutter 확인 화면 | ⏭ 다음 |
-| 3-4 | 승인·Execute API + 멱등 실행 + Row Lock/단일 Transaction | 대기 |
+| 3-3 | Action Plan 조회·Action 수정/삭제 + Flutter 확인 화면 | ✅ 완료 |
+| 3-4 | 승인·Execute API + 멱등 실행 + Row Lock/단일 Transaction | ⏭ 다음 |
 | 3-5 | 품목 후보 검색·미확정 처리 + 사용자 승인 ItemAlias 저장 | 대기 |
 
 ### 20.2 Phase 3-1 구현 결과
@@ -1153,7 +1153,8 @@ Request Body는 없고 Phase 3-1에서 받은 `request_id`를 Path로 전달한�
 Backend 검증 범위:
 
 - Schema version `1.0`, `requires_confirmation=true`, Action 1~50개.
-- `stock_in`/`stock_out`만 허용하며 수량은 양수·정수 9자리·소수 3자리 이하다.
+- `stock_in`/`stock_out`은 양수, `set_quantity`는 0 이상이며 모든 수량은 정수
+  9자리·소수 3자리 이하다.
 - Action ID, 같은 품목/같은 유형 Action 중복을 거부한다.
 - 연결 ID가 현재 Household의 활성 품목인지, 공식 이름과 기본 단위가 현재 값과
   일치하는지 확인한다.
@@ -1192,7 +1193,80 @@ OpenAI 설정은 `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL`이며 �
   Schema로 변환하는 것을 확인했다.
 - 이 환경에는 `OPENAI_API_KEY`가 없어 실제 유료 Provider 호출은 수행하지 않았다.
 
-다음 3-3은 저장된 Plan을 조회하고 Action을 개별 수정·삭제하는 API를 만든 뒤 Flutter
-`/action-plan/:requestId` 확인 화면에 연결한다. 수정 후에도 같은 서버 검증을 다시
-통과해야 하며, `requires_user_input=true`인 Action이 남아 있으면 실행 단계로 넘기지
-않는다.
+이 생성 결과를 조회·편집하는 흐름은 §20.6에서 구현했다.
+
+### 20.6 Phase 3-3 Action Plan 확인·수정·삭제
+
+Backend API:
+
+```text
+GET    /api/v1/action-plan/{request_id}
+PATCH  /api/v1/action-plan/{request_id}/actions/{action_id}
+DELETE /api/v1/action-plan/{request_id}/actions/{action_id}
+```
+
+조회는 현재 Household에 속한 저장 Plan 전체를 반환한다. 수정 Request는 다음
+형식이며 성공 시 수정된 전체 Plan을 반환한다.
+
+```json
+{
+  "type": "set_quantity",
+  "item_id": "품목 UUID",
+  "quantity": 0,
+  "unit": "개"
+}
+```
+
+수정·삭제 Transaction은 VoiceRequest Row를 먼저 Lock하고 ActionPlan Row를 다음에
+Lock한다. Plan 생성·향후 Execute와 Lock 순서를 통일해 교착 가능성을 줄였다. 이어서
+현재 Household의 활성 품목과 최신 Snapshot을 조회하고, 전체 payload를 다시 검증한
+뒤 `payload_json`만 저장한다. InventoryEvent, Snapshot, AuditLog는 변경하지 않는다.
+
+사용자가 수정한 Action은 현재 공식 품목명·기본 단위로 다시 구성하며
+`confidence=1.0`, `warnings=[]`, `requires_user_input=false`가 된다. AI가 만든 기존
+수량 요약이 틀린 채 남지 않도록 Plan summary는 `사용자가 확인한 재고 변경 N건`으로
+교체한다.
+
+Action Type은 `stock_in`, `stock_out`, `set_quantity`다. 입고·소비는 0보다 큰
+변경량만 허용하고, `set_quantity`는 “다 먹었어”를 표현할 수 있도록 0을 허용한다.
+Phase 3-3에는 단위 변환 규칙이 없으므로 편집 화면은 선택 품목의 `default_unit`을
+읽기 전용으로 사용하고 Backend도 정확히 같은 단위만 허용한다.
+
+삭제는 선택한 Action 하나만 제거하고 나머지 전체 Plan을 반환한다. Action Plan은
+비어 있을 수 없으므로 마지막 Action 삭제는 `409 ACTION_PLAN_REQUIRES_ACTION`으로
+거부한다. 화면의 `전체 취소`는 현재 Plan/원본 기록을 삭제하지 않고 화면을 나가는
+행동이다.
+
+추가 오류:
+
+- Plan 없음 또는 다른 Household: `404 ACTION_PLAN_NOT_FOUND`.
+- Action ID 없음: `404 ACTION_PLAN_ACTION_NOT_FOUND`.
+- 승인·실행됐거나 확인 대기 상태가 아님: `409 ACTION_PLAN_NOT_EDITABLE`.
+- 마지막 Action 삭제: `409 ACTION_PLAN_REQUIRES_ACTION`.
+- 비활성/다른 Household 품목, 음수 결과 등: `422 ACTION_PLAN_INVALID`.
+- 기본 단위 불일치: `422 UNIT_MISMATCH`.
+
+Flutter:
+
+- 홈의 `텍스트로 음성 흐름 테스트`에서 Transcript를 입력하면 VoiceRequest 생성 →
+  Action Plan 생성 → `/action-plan/:requestId` 이동을 순서대로 수행한다.
+- 확인 화면은 원본 Transcript, summary, Action별 작업·수량·단위·Confidence·경고와
+  `수정 필요` 상태를 표시한다.
+- 수정 Bottom Sheet에서 활성 품목, 입고·소비·현재 수량 설정, 수량을 편집한다.
+- 삭제 전 확인 Dialog를 표시하고, 마지막 Action은 Client에서도 요청 전에 안내한다.
+- `반영` 버튼은 Phase 3-4 전까지 비활성화해 승인 전 실행을 구조적으로 막는다.
+- Provider/Backend 오류는 공통 `ApiException.message`로 Snackbar 또는 Sheet 오류에
+  표시한다.
+
+검증(2026-07-28):
+
+- Backend `uv run pytest` → **108 passed, 13 skipped**.
+- Backend Ruff 통과, Mypy 83개 Source File 이슈 0, Alembic head `20260728_0003`.
+- Flutter `flutter analyze` → 이슈 0.
+- Flutter `flutter test` → **33 passed**.
+- 실제 PostgreSQL Integration Test는 `TEST_DATABASE_URL` 미설정으로 Skip했다.
+- 실제 OpenAI 생성과 운영 쓰기 API는 호출하지 않았다.
+
+다음 3-4는 `waiting_confirmation` Plan을 명시적으로 승인하고 Execute한다. 모든
+Action을 최신 Snapshot Row Lock 아래 InventoryEvent로 변환하고 Snapshot·Audit와
+함께 하나의 Transaction으로 Commit하며, 같은 Plan의 중복 실행을 차단한다.

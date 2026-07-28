@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../features/action_plan/presentation/action_plan_page.dart';
 import '../features/history/presentation/history_page.dart';
 import '../features/home/presentation/home_page.dart';
 import '../features/inventory/presentation/inventory_detail_page.dart';
@@ -19,6 +20,11 @@ GoRouter buildRouter() {
     navigatorKey: _rootKey,
     initialLocation: '/home',
     routes: [
+      GoRoute(
+        path: '/action-plan/:requestId',
+        builder: (context, state) =>
+            ActionPlanPage(requestId: state.pathParameters['requestId']!),
+      ),
       StatefulShellRoute.indexedStack(
         builder: (context, state, navigationShell) =>
             HomeShell(navigationShell: navigationShell),

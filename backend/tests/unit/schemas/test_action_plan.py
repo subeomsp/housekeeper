@@ -79,3 +79,18 @@ def test_action_plan_schema_rejects_duplicate_action_ids_and_extra_fields() -> N
 
     with pytest.raises(ValidationError):
         ActionPlanPayload.model_validate(payload)
+
+
+def test_set_quantity_allows_zero_but_stock_change_does_not() -> None:
+    payload = valid_payload()
+    action = payload["actions"][0]  # type: ignore[index]
+    action["type"] = "set_quantity"
+    action["quantity"]["raw_value"] = 0
+    action["quantity"]["normalized_value"] = 0
+
+    parsed = ActionPlanPayload.model_validate(payload)
+    assert parsed.actions[0].quantity.normalized_value == 0
+
+    action["type"] = "stock_out"
+    with pytest.raises(ValidationError):
+        ActionPlanPayload.model_validate(payload)
