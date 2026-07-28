@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**. 다음은 Phase 3 Action Plan이며 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19.
+현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1 Action Plan 기반 구현 완료**. 다음은 Phase 3-2 Planner와 Action Plan 생성이며, 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19~20.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -1054,7 +1054,7 @@ Phase 2 구현 순서의 API Client, 재고 목록·상세, 기록, 품목 CRUD/
 
 ### 19.9 Phase 3 착수 지침 (다음 작업)
 
-- `product_spec.md` Phase 3 순서대로 VoiceRequest, ActionPlan, ItemAlias 모델과 Migration부터 설계한다. 실제 녹음·STT는 제외하고 텍스트 Transcript 입력으로 시작한다.
+- `product_spec.md` Phase 3 순서대로 VoiceRequest, ActionPlan, ItemAlias 모델과 Migration부터 설계한다. 실제 녹음·STT는 제외하고 텍스트 Transcript 입력으로 시작한다. 이 기반 작업은 §20의 Phase 3-1에서 완료했다.
 - LLM은 DB를 수정하지 않고 Execution Plan만 생성하며, 사용자 승인 전 InventoryEvent를 만들지 않는다.
 - Action 수정·삭제·승인 UI와 Execute API를 만들고, Execute는 승인된 Plan의 모든 Event·Snapshot·Audit를 하나의 Transaction으로 처리하며 중복 실행을 차단한다.
 - 품목 연결이 불확실하거나 미등록 품목이면 자동 확정하지 않고 후보 선택·신규 품목 확인을 거친다. 사용자가 승인한 음성 표현만 `voice_confirmation` ItemAlias로 저장한다.
@@ -1066,3 +1066,68 @@ Phase 2 구현 순서의 API Client, 재고 목록·상세, 기록, 품목 CRUD/
 - Git: 슬라이스 단위 커밋(`Phase 2-N: ...`) 후 `git push origin main`. 저장소 `github.com/subeomsp/housekeeper`(main). 커밋 메시지 끝에 `Co-Authored-By: Claude ...` 유지.
 - 사용자는 코드가 아니라 **제품 흐름**을 검토한다. 각 단계 완료 시 AGENTS.md의 🤖 Assistant 헤더 형식으로 화면 흐름·입출력·거부 조건 중심으로 보고한다.
 - 절대 규칙: `.env`/시크릿 커밋 금지, DB 비밀번호 출력/에코 금지, 운영 Neon DB를 테스트에 사용 금지(테스트는 `TEST_DATABASE_URL`=test 브랜치).
+
+## 20. Phase 3 Action Plan 구현 상태
+
+Phase 3는 실제 녹음·STT보다 먼저 텍스트 Transcript로 Plan 생성·검토·실행 규칙을
+검증한다. LLM은 Inventory를 직접 수정하지 않으며, 승인 전에는 InventoryEvent 또는
+Snapshot 변경을 만들지 않는다.
+
+### 20.1 수직 슬라이스 순서
+
+| 단계 | 내용 | 상태 |
+|---|---|---|
+| 3-1 | VoiceRequest·ActionPlan·ItemAlias 모델/Migration + 텍스트 Transcript 접수 API | ✅ 완료 |
+| 3-2 | Planner Provider 경계 + 엄격한 Plan Schema/검증 + Action Plan 생성 | ⏭ 다음 |
+| 3-3 | Action Plan 조회·Action 수정/삭제 + Flutter 확인 화면 | 대기 |
+| 3-4 | 승인·Execute API + 멱등 실행 + Row Lock/단일 Transaction | 대기 |
+| 3-5 | 품목 후보 검색·미확정 처리 + 사용자 승인 ItemAlias 저장 | 대기 |
+
+### 20.2 Phase 3-1 구현 결과
+
+- Migration head `20260728_0003`에서 `voice_requests`, `action_plans`, `item_aliases`를
+  추가했다.
+- VoiceRequest는 Household 경계를 강제하기 위해 명세 초기 스케치에 없던
+  `household_id`를 필수로 둔다. 향후 업로드·STT 이전 상태도 같은 행으로 표현할 수
+  있도록 `transcript`와 `audio_path`는 nullable이다.
+- ActionPlan은 MVP에서 별도 Action 행 대신 `payload_json` 하나로 보관한다. 한
+  VoiceRequest에 Plan은 최대 하나이며, 이후 재생성·편집은 같은 Plan을 갱신하는
+  방향이다. `approved`와 `executed` 기본값은 모두 `false`다.
+- ItemAlias는 `(household_id, normalized_alias)`가 유일하다. Household 간에는 같은
+  발음을 사용할 수 있고, 저장 출처는 `source`로 구분한다. Alias 생성/조회 동작은
+  아직 API에 연결하지 않았다.
+
+### 20.3 텍스트 Voice Request API
+
+`POST /api/v1/voice-requests/text`
+
+```json
+{"transcript":"우유 두 개 사왔어."}
+```
+
+성공 시 `201`로 `request_id`, 공백 제거된 `transcript`, `status: "planning"`,
+`created_at`을 반환한다.
+
+처리 순서는 Schema가 앞뒤 공백과 빈 문자열을 검증하고, Service가 현재 Household를
+연결한 VoiceRequest를 하나의 Transaction으로 저장한 뒤 응답하는 방식이다. 이 단계는
+ActionPlan, InventoryEvent, Snapshot, AuditLog를 생성하거나 수정하지 않는다.
+
+빈 문자열은 공통 Error Response 형식의 `422 VALIDATION_ERROR`로 거부한다. 현재
+기본 상태는 `planning`, `audio_path`는 `null`이다. 인증이 없는 기존 Phase 1 구조를
+따라 현재 고정 개발 Household 의존성을 사용한다.
+
+### 20.4 검증과 다음 연결점
+
+- 2026-07-28: `uv run pytest` → **83 passed, 12 skipped**. Skip 12건은
+  `TEST_DATABASE_URL`이 없는 환경에서 실제 PostgreSQL Integration Test만 제외된
+  결과다.
+- `uv run ruff check .` 통과.
+- `uv run mypy app tests` → 73개 Source File, 이슈 0.
+- `uv run alembic heads` → `20260728_0003 (head)`.
+- 빈 DB 기준 Offline SQL 생성으로 0001 → 0002 → 0003 Migration 연결을 확인했다.
+
+다음 3-2는 Planner가 Transcript를 엄격한 Action Plan Schema로 변환하되 DB 변경은
+하지 않는 경계를 만든다. Plan 생성이 성공하면 VoiceRequest를
+`waiting_confirmation`으로 전환하고, 실패하면 재시도 가능한 오류 상태를 기록하는
+흐름을 먼저 확정한다. 실제 LLM Provider와 키가 없더라도 테스트용 결정적 Planner로
+Service·API 계약을 검증할 수 있게 분리한다.

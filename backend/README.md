@@ -5,15 +5,11 @@ FastAPI backend for the Voice Inventory Agent.
 For the current implementation status, product decisions, and remaining work, see
 `../HANDOFF.md` before continuing development.
 
-The project is implementing Phase 1 from `../product_spec.md`. The application bootstrap, health
-check, PostgreSQL async session infrastructure, Alembic environment, Phase 1 database models, and
-initial migration are implemented. The idempotent development seed is also available. Inventory
-Item creation, list, update, archive, and restore APIs are implemented. Current inventory list, item
-detail, manual Inventory Event creation, setting the current quantity, Inventory Event history, and
-event correction and cancellation are available, along with an internal Snapshot rebuild service. The
-remaining Phase 1 work is real PostgreSQL integration tests and the deployment close-out (Dockerfile,
-readiness check, Neon migration/seed). Mutations write Audit Logs in the same transaction; Item Alias
-matching remains a Phase 3 feature.
+Phase 1 inventory APIs are complete and deployed. Phase 3 is now in progress: the Voice Request,
+Action Plan, and Item Alias persistence foundation is implemented, together with a temporary text
+Transcript entry API. Action Plan generation, review, approval, and execution are intentionally
+separate follow-up slices. Mutations still follow the Phase 1 Event/Snapshot transaction rules, and
+the text entry endpoint does not change inventory.
 
 ## Requirements
 
@@ -91,6 +87,7 @@ POST   /api/v1/inventory-events
 GET    /api/v1/inventory-events
 PATCH  /api/v1/inventory-events/{event_id}
 DELETE /api/v1/inventory-events/{event_id}
+POST   /api/v1/voice-requests/text
 ```
 
 Item creation normalizes the item name, rejects Household-level duplicates, and creates its
@@ -134,6 +131,16 @@ corrected or cancelled.
 helper (not an HTTP endpoint). It locks the Snapshot and recomputes it from the sum of every event's
 signed quantity, including originals and their reversals, so a reversed original and its reversal
 cancel out. Reversed originals are never excluded from the sum.
+
+The temporary text Voice Request endpoint accepts a non-blank `transcript`, associates it with the
+current Household, and returns a request identifier with status `planning`. It stores only the
+Voice Request in one transaction: it does not create an Action Plan, Inventory Event, Snapshot
+change, or Audit Log. This lets the Action Plan workflow be developed before audio upload and STT.
+
+The current Alembic head is `20260728_0003`. It adds `voice_requests`, `action_plans`, and
+`item_aliases`. A Voice Request belongs to one Household, has an optional transcript/audio path for
+future audio states, and can have at most one Action Plan. Item Alias uniqueness is scoped to a
+Household by normalized alias.
 
 ## Verify
 

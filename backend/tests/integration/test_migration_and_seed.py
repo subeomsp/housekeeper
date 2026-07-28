@@ -15,7 +15,7 @@ from app.models import Household, Inventory, InventoryItem, User
 from app.scripts.seed import seed_database
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
-MIGRATION_HEAD = "20260720_0002"
+MIGRATION_HEAD = "20260728_0003"
 EXPECTED_TABLES = {
     "households",
     "users",
@@ -24,6 +24,9 @@ EXPECTED_TABLES = {
     "inventory",
     "inventory_events",
     "audit_logs",
+    "voice_requests",
+    "action_plans",
+    "item_aliases",
     "alembic_version",
 }
 
@@ -50,13 +53,10 @@ async def test_alembic_migrations_apply_to_empty_database(
         assert completed.returncode == 0, completed.stderr
 
         async with engine.connect() as connection:
-            version = await connection.scalar(
-                text("SELECT version_num FROM alembic_version")
-            )
+            version = await connection.scalar(text("SELECT version_num FROM alembic_version"))
             table_rows = await connection.scalars(
                 text(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public'"
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
                 )
             )
             tables = set(table_rows.all())
@@ -91,9 +91,7 @@ async def test_seed_is_idempotent(integration_engine: AsyncEngine) -> None:
         items = await session.scalar(select(func.count()).select_from(InventoryItem))
         snapshots = await session.scalar(select(func.count()).select_from(Inventory))
         zero_snapshots = await session.scalar(
-            select(func.count())
-            .select_from(Inventory)
-            .where(Inventory.quantity == Decimal("0"))
+            select(func.count()).select_from(Inventory).where(Inventory.quantity == Decimal("0"))
         )
 
     assert households == 1
