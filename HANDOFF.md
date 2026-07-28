@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포됨. **Phase 2 (Flutter 앱) 진행 중** — 2-1(골격+재고목록), 2-2(품목상세) 완료, 다음은 2-3(입고/소비·목표수량). 상세는 아래 §19.
+현재 단계: Phase 1 Backend 완료·배포됨. **Phase 2 (Flutter 앱) 진행 중** — 2-1(골격+재고목록), 2-2(품목상세), 2-3(입고/소비·목표수량) 완료, 다음은 2-4(기록 목록·Event 정정/취소). 상세는 아래 §19.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -116,7 +116,7 @@ Inventory Snapshot
 → 최종 2개
 ```
 
-현재 구현된 것은 변경량을 받는 수동 Event API이다. 목표 수량 설정 API는 다음 구현 대상이다.
+Backend와 Flutter 앱 모두 변경량을 받는 수동 Event 흐름과 목표 수량 설정 흐름을 제공한다.
 
 ### 4.4 현재 이름, 이름 변경 이력, 음성 Alias
 
@@ -998,23 +998,31 @@ frontend/lib/
 |---|---|---|---|
 | 2-1 | 골격 + core + **재고 목록** | `GET /inventory` | ✅ 완료 (커밋 `Phase 2-1`) |
 | 2-2 | **품목 상세** + 최근 Event | `GET /inventory/{id}` | ✅ 완료 (커밋 `Phase 2-2`) |
-| 2-3 | **수동 입고/소비 + 목표 수량 설정** | `POST /inventory-events`(stock_in/out), `PUT /inventory/{id}/quantity` | ⏭ 다음 |
-| 2-4 | **기록 목록** + Event 정정/취소 | `GET /inventory-events`, `PATCH`/`DELETE /inventory-events/{id}` | 대기 |
+| 2-3 | **수동 입고/소비 + 목표 수량 설정** | `POST /inventory-events`(stock_in/out), `PUT /inventory/{id}/quantity` | ✅ 완료 |
+| 2-4 | **기록 목록** + Event 정정/취소 | `GET /inventory-events`, `PATCH`/`DELETE /inventory-events/{id}` | ⏭ 다음 |
 | 2-5 | **품목 생성/수정/보관/복원** | `POST/PATCH/DELETE /inventory-items`, `POST .../restore` | 대기 |
 | 2-6 | 오류 상태·수동 새로고침 마감 + Phase 2 종료 | (횡단) | 대기 |
 
 Phase 2 완료 기준 체크리스트: product_spec.md **§61 Phase 2 항목** 및 스펙 §68 API 계약 참조.
 
-### 19.5 2-3 착수 지침 (바로 다음 작업)
+### 19.5 2-3 구현 결과
 
-- 상세 화면(`inventory_detail_page.dart`)과 목록에 **입고/소비/목표수량 설정** 진입(버튼 또는 FAB)을 붙인다.
-- 입고/소비: 수량(>0)·메모 입력 → `POST /api/v1/inventory-events` body `{item_id,event_type:"stock_in"|"stock_out",quantity,unit,note?}`. 외부에서 허용되는 타입은 **stock_in/stock_out만**(그 외는 422). 단위는 품목 기본 단위를 기본값으로.
-- 목표 수량: 최종 수량(ge 0) 입력 → `PUT /api/v1/inventory/{id}/quantity` body `{quantity,unit,note?}`. 백엔드가 `target-current`를 계산해 adjustment_in/out 기록, 같으면 `changed:false`.
-- 성공 후 `ref.invalidate(inventoryDetailProvider(itemId))` + `ref.invalidate(inventoryListProvider)`로 갱신.
-- **음수 재고는 서버가 거부**(`INSUFFICIENT_INVENTORY` 등) → `ApiException.message`를 스낵바로 표시. 요청 중 버튼 비활성/중복 제출 방지.
-- 수량 입력은 소수 3자리까지 가능(백엔드 `decimal_places=3`). Decimal은 문자열이 아니라 숫자로 전송.
+- 상세 화면에는 입고·소비 버튼과 전체 너비의 목표 수량 설정 버튼, 목록 각 행에는 같은 세 흐름을 여는 메뉴를 붙였다. 보관 품목에는 변경 진입점을 노출하지 않는다.
+- 세 흐름은 `inventory_quantity_sheet.dart`의 공용 Bottom Sheet를 사용한다. 입고·소비는 양수 변경량, 목표 수량은 0 이상의 최종 수량을 받으며 메모는 선택이다. 기본 단위는 화면에 고정 표시하고 품목 `default_unit`을 그대로 전송한다.
+- 수량은 Backend 제약과 동일하게 정수 9자리·소수 3자리까지 검증하고 JSON number로 보낸다. 수동 Event Type은 Front에서도 enum으로 `stock_in`/`stock_out`만 표현한다.
+- 요청 중 입력·모드·제출 버튼을 비활성화해 중복 제출을 막는다. 서버가 음수 재고, 단위 불일치, 비활성 품목 등을 거부하면 공통 `ApiException.message`를 Sheet의 Snackbar로 표시하고 입력 상태를 유지한다.
+- 성공하면 Sheet를 닫고 최종 수량을 알린 뒤 상세 Provider와 목록 Provider를 모두 invalidate한다. 목표 수량이 현재와 같아 `changed:false`이면 별도 변경 없이 이미 같은 수량임을 알린다.
+- 검증(2026-07-28): Flutter 3.32.8 / Dart 3.8.1 기준 `flutter analyze` 이슈 0, `flutter test` 9 passed. API body·응답 계약, 수량 경계값, 세 모드 UI와 목표 수량 기본값을 테스트한다.
+- macOS 실제 빌드/실행은 현재 작업 장비에 전체 Xcode와 CocoaPods가 없어 수행하지 못했다. 컴파일·정적 분석·Widget Test는 통과했다.
 
-### 19.6 검증/작업 관례
+### 19.6 2-4 착수 지침 (바로 다음 작업)
+
+- 기록 탭 placeholder를 `GET /api/v1/inventory-events` 기반 목록으로 바꾼다. 기본 정렬은 Backend 계약대로 `created_at desc`, 동일 시각 `id desc`이며 Pagination과 품목·Event Type·기간 필터를 연결한다.
+- 각 기록에서 정정은 `PATCH /inventory-events/{event_id}`, 취소는 `DELETE /inventory-events/{event_id}`를 호출한다. 원본 Event를 직접 수정·삭제하는 UI나 API는 만들지 않는다.
+- 정정 입력은 `stock_in`/`stock_out`, 양수 수량, 품목 기본 단위, 선택 메모만 허용한다. 성공 후 기록 목록·해당 품목 상세·재고 목록을 모두 갱신한다.
+- 이미 취소된 기록, Reversal 기록, 정정 결과 음수 재고 등 Backend 거부 사유는 공통 오류 메시지로 표시하고 확인이 필요한 취소 동작에는 확인 Dialog를 둔다.
+
+### 19.7 검증/작업 관례
 
 - 프론트: `cd frontend && flutter analyze`(이슈 0 유지) + `flutter test`. 각 슬라이스 후 앱 재실행으로 실제 Render 데이터로 확인.
 - 백엔드 변경 시: `cd backend && uv run pytest && uv run ruff check . && uv run mypy app tests`.

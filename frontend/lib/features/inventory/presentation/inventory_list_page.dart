@@ -6,6 +6,7 @@ import '../../../core/format/quantity_format.dart';
 import '../../../core/widgets/async_view.dart';
 import '../domain/inventory_item.dart';
 import 'inventory_providers.dart';
+import 'inventory_quantity_sheet.dart';
 
 /// Current inventory list (spec §68.6). Reads Snapshot quantities via the API,
 /// supports search, manual refresh, and taps through to item detail.
@@ -67,7 +68,9 @@ class _SearchFieldState extends ConsumerState<_SearchField> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: ref.read(inventorySearchProvider));
+    _controller = TextEditingController(
+      text: ref.read(inventorySearchProvider),
+    );
   }
 
   @override
@@ -106,23 +109,55 @@ class _SearchFieldState extends ConsumerState<_SearchField> {
   }
 }
 
-class _InventoryTile extends StatelessWidget {
+class _InventoryTile extends ConsumerWidget {
   const _InventoryTile({required this.item});
 
   final InventoryItem item;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final isZero = item.quantity <= 0;
     return ListTile(
       title: Text(item.name),
       subtitle: item.category == null ? null : Text(item.category!),
-      trailing: Text(
-        '${formatQuantity(item.quantity)} ${item.unit}',
-        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '${formatQuantity(item.quantity)} ${item.unit}',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
               color: isZero ? Colors.redAccent : null,
               fontWeight: FontWeight.w600,
             ),
+          ),
+          if (item.isActive)
+            PopupMenuButton<InventoryQuantityAction>(
+              tooltip: '수량 변경',
+              onSelected: (action) => showInventoryQuantitySheet(
+                context: context,
+                ref: ref,
+                itemId: item.itemId,
+                itemName: item.name,
+                unit: item.unit,
+                currentQuantity: item.quantity,
+                initialAction: action,
+              ),
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: InventoryQuantityAction.stockIn,
+                  child: Text('입고'),
+                ),
+                PopupMenuItem(
+                  value: InventoryQuantityAction.stockOut,
+                  child: Text('소비'),
+                ),
+                PopupMenuItem(
+                  value: InventoryQuantityAction.setQuantity,
+                  child: Text('목표 수량 설정'),
+                ),
+              ],
+            ),
+        ],
       ),
       onTap: () => context.push('/inventory/${item.itemId}'),
     );
