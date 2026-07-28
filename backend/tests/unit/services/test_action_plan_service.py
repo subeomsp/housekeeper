@@ -1,0 +1,264 @@
+from datetime import UTC, datetime
+from decimal import Decimal
+from types import TracebackType
+from typing import cast
+from uuid import UUID
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import AppError
+from app.models import ActionPlan, InventoryItem, VoiceRequest
+from app.providers import (
+    InventoryPlannerProvider,
+    PlannerProviderError,
+    UnconfiguredInventoryPlannerProvider,
+)
+from app.repositories.action_plan_repository import ActionPlanRepository
+from app.repositories.inventory_item_repository import (
+    InventoryItemRepository,
+    PlannerInventoryRecord,
+)
+from app.repositories.voice_request_repository import VoiceRequestRepository
+from app.schemas.action_plan import ActionPlanPayload, PlannerInventoryItem
+from app.services.action_plan_service import ActionPlanService, ActionPlanValidator
+
+HOUSEHOLD_ID = UUID("00000000-0000-4000-8000-000000000099")
+REQUEST_ID = UUID("00000000-0000-4000-8000-000000000501")
+PLAN_ID = UUID("00000000-0000-4000-8000-000000000601")
+ITEM_ID = UUID("00000000-0000-4000-8000-000000000111")
+CREATED_AT = datetime(2026, 7, 28, 13, 0, tzinfo=UTC)
+
+
+class FakeTransaction:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+
+class FakeSession:
+    def begin(self) -> FakeTransaction:
+        return FakeTransaction()
+
+
+class FakeVoiceRequestRepository(VoiceRequestRepository):
+    def __init__(self) -> None:
+        self.request = VoiceRequest(
+            id=REQUEST_ID,
+            household_id=HOUSEHOLD_ID,
+            transcript="우유 두 개 사왔어.",
+            status="planning",
+        )
+
+    async def get_for_household(
+        self,
+        session: AsyncSession,
+        *,
+        request_id: UUID,
+        household_id: UUID,
+        for_update: bool = False,
+    ) -> VoiceRequest | None:
+        del session, for_update
+        if request_id == REQUEST_ID and household_id == HOUSEHOLD_ID:
+            return self.request
+        return None
+
+    async def save(
+        self,
+        session: AsyncSession,
+        *,
+        voice_request: VoiceRequest,
+    ) -> None:
+        del session, voice_request
+
+
+class FakeActionPlanRepository(ActionPlanRepository):
+    def __init__(self) -> None:
+        self.plan: ActionPlan | None = None
+
+    async def get_by_voice_request(
+        self,
+        session: AsyncSession,
+        *,
+        voice_request_id: UUID,
+    ) -> ActionPlan | None:
+        del session, voice_request_id
+        return self.plan
+
+    async def add(
+        self,
+        session: AsyncSession,
+        *,
+        action_plan: ActionPlan,
+    ) -> None:
+        del session
+        action_plan.id = PLAN_ID
+        action_plan.created_at = CREATED_AT
+        self.plan = action_plan
+
+
+class FakeInventoryItemRepository(InventoryItemRepository):
+    async def list_active_for_planner(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+    ) -> list[PlannerInventoryRecord]:
+        del session, household_id
+        return [
+            PlannerInventoryRecord(
+                item=InventoryItem(
+                    id=ITEM_ID,
+                    household_id=HOUSEHOLD_ID,
+                    name="우유",
+                    normalized_name="우유",
+                    default_unit="개",
+                    is_active=True,
+                ),
+                current_quantity=Decimal("1"),
+            )
+        ]
+
+
+class FakePlanner:
+    def __init__(self, *, fails: bool = False) -> None:
+        self.fails = fails
+        self.calls = 0
+
+    async def create_action_plan(
+        self,
+        *,
+        transcript: str,
+        inventory_context: list[PlannerInventoryItem],
+    ) -> ActionPlanPayload:
+        self.calls += 1
+        if self.fails:
+            raise PlannerProviderError
+        return ActionPlanPayload.model_validate(
+            {
+                "version": "1.0",
+                "transcript": transcript,
+                "summary": "우유 2개 입고",
+                "requires_confirmation": True,
+                "actions": [
+                    {
+                        "action_id": "a1",
+                        "type": "stock_in",
+                        "item": {
+                            "raw_name": "우유",
+                            "matched_item_id": inventory_context[0].item_id,
+                            "matched_name": inventory_context[0].name,
+                            "is_new_item": False,
+                        },
+                        "quantity": {
+                            "raw_value": 2,
+                            "raw_unit": "개",
+                            "normalized_value": 2,
+                            "normalized_unit": "개",
+                            "conversion_applied": False,
+                            "conversion_reason": None,
+                        },
+                        "confidence": 0.98,
+                        "warnings": [],
+                        "requires_user_input": False,
+                    }
+                ],
+            }
+        )
+
+
+def build_service(
+    voice_repository: FakeVoiceRequestRepository,
+    plan_repository: FakeActionPlanRepository,
+) -> ActionPlanService:
+    return ActionPlanService(
+        voice_request_repository=voice_repository,
+        action_plan_repository=plan_repository,
+        inventory_item_repository=FakeInventoryItemRepository(),
+        validator=ActionPlanValidator(),
+    )
+
+
+async def test_generate_stores_plan_and_waits_for_confirmation() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+    planner = FakePlanner()
+
+    result = await build_service(voice_repository, plan_repository).generate(
+        cast(AsyncSession, FakeSession()),
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        provider=cast(InventoryPlannerProvider, planner),
+    )
+
+    assert result.plan_id == PLAN_ID
+    assert result.approved is False
+    assert result.executed is False
+    assert voice_repository.request.status == "waiting_confirmation"
+    assert plan_repository.plan is not None
+    assert planner.calls == 1
+
+
+async def test_generate_returns_existing_plan_without_calling_provider_again() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+    planner = FakePlanner()
+    service = build_service(voice_repository, plan_repository)
+    session = cast(AsyncSession, FakeSession())
+
+    first = await service.generate(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        provider=cast(InventoryPlannerProvider, planner),
+    )
+    second = await service.generate(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        provider=cast(InventoryPlannerProvider, planner),
+    )
+
+    assert second.plan_id == first.plan_id
+    assert planner.calls == 1
+
+
+async def test_provider_failure_marks_request_failed_for_retry() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+
+    with pytest.raises(AppError) as raised:
+        await build_service(voice_repository, plan_repository).generate(
+            cast(AsyncSession, FakeSession()),
+            household_id=HOUSEHOLD_ID,
+            request_id=REQUEST_ID,
+            provider=cast(InventoryPlannerProvider, FakePlanner(fails=True)),
+        )
+
+    assert raised.value.code == "ACTION_PLAN_PROVIDER_ERROR"
+    assert voice_repository.request.status == "failed"
+    assert plan_repository.plan is None
+
+
+async def test_missing_provider_configuration_returns_service_unavailable() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+
+    with pytest.raises(AppError) as raised:
+        await build_service(voice_repository, plan_repository).generate(
+            cast(AsyncSession, FakeSession()),
+            household_id=HOUSEHOLD_ID,
+            request_id=REQUEST_ID,
+            provider=UnconfiguredInventoryPlannerProvider(),
+        )
+
+    assert raised.value.code == "PLANNER_NOT_CONFIGURED"
+    assert raised.value.status_code == 503
+    assert voice_repository.request.status == "failed"

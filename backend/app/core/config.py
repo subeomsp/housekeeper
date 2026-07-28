@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # integration tests are skipped.
     test_database_url: str | None = None
     database_echo: bool = False
+    llm_provider: Literal["openai"] = "openai"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-5.6-sol"
 
     @field_validator("database_url", "test_database_url", mode="before")
     @classmethod

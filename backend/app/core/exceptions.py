@@ -139,3 +139,46 @@ def event_not_correctable_error(event_id: str) -> AppError:
         status_code=409,
         details={"event_id": event_id},
     )
+
+
+def voice_request_not_found_error(request_id: str) -> AppError:
+    return AppError(
+        code="VOICE_REQUEST_NOT_FOUND",
+        message="음성 요청을 찾을 수 없습니다.",
+        status_code=404,
+        details={"request_id": request_id},
+    )
+
+
+def voice_request_not_plannable_error(request_id: str, status: str) -> AppError:
+    return AppError(
+        code="VOICE_REQUEST_NOT_PLANNABLE",
+        message="현재 상태에서는 Action Plan을 생성할 수 없습니다.",
+        status_code=409,
+        details={"request_id": request_id, "status": status},
+    )
+
+
+def planner_not_configured_error() -> AppError:
+    return AppError(
+        code="PLANNER_NOT_CONFIGURED",
+        message="Action Plan 생성 Provider가 설정되지 않았습니다.",
+        status_code=503,
+    )
+
+
+def action_plan_provider_error() -> AppError:
+    return AppError(
+        code="ACTION_PLAN_PROVIDER_ERROR",
+        message="Action Plan을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        status_code=502,
+    )
+
+
+def action_plan_invalid_error(issues: list[dict[str, str]]) -> AppError:
+    return AppError(
+        code="ACTION_PLAN_INVALID",
+        message="생성된 Action Plan이 실행 안전성 검증을 통과하지 못했습니다.",
+        status_code=422,
+        details={"issues": issues},
+    )

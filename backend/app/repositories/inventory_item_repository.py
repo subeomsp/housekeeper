@@ -20,7 +20,39 @@ class InventoryItemPage:
     total: int
 
 
+@dataclass(frozen=True)
+class PlannerInventoryRecord:
+    item: InventoryItem
+    current_quantity: Decimal
+
+
 class InventoryItemRepository:
+    async def list_active_for_planner(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+    ) -> list[PlannerInventoryRecord]:
+        rows = (
+            await session.execute(
+                select(InventoryItem, Inventory.quantity)
+                .join(
+                    Inventory,
+                    (Inventory.household_id == InventoryItem.household_id)
+                    & (Inventory.item_id == InventoryItem.id),
+                )
+                .where(
+                    InventoryItem.household_id == household_id,
+                    InventoryItem.is_active.is_(True),
+                )
+                .order_by(InventoryItem.name.asc(), InventoryItem.id.asc())
+            )
+        ).all()
+        return [
+            PlannerInventoryRecord(item=row[0], current_quantity=row[1])
+            for row in rows
+        ]
+
     async def normalized_name_exists(
         self,
         session: AsyncSession,

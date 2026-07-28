@@ -7,9 +7,11 @@ For the current implementation status, product decisions, and remaining work, se
 
 Phase 1 inventory APIs are complete and deployed. Phase 3 is now in progress: the Voice Request,
 Action Plan, and Item Alias persistence foundation is implemented, together with a temporary text
-Transcript entry API. Action Plan generation, review, approval, and execution are intentionally
-separate follow-up slices. Mutations still follow the Phase 1 Event/Snapshot transaction rules, and
-the text entry endpoint does not change inventory.
+Transcript entry API. Action Plan generation is available through a provider-neutral Planner
+interface with an OpenAI Responses API adapter and strict Structured Output validation. Review,
+editing, approval, and execution are intentionally separate follow-up slices. Mutations still follow
+the Phase 1 Event/Snapshot transaction rules, and neither text entry nor Plan generation changes
+inventory.
 
 ## Requirements
 
@@ -88,6 +90,7 @@ GET    /api/v1/inventory-events
 PATCH  /api/v1/inventory-events/{event_id}
 DELETE /api/v1/inventory-events/{event_id}
 POST   /api/v1/voice-requests/text
+POST   /api/v1/voice-requests/{request_id}/action-plan
 ```
 
 Item creation normalizes the item name, rejects Household-level duplicates, and creates its
@@ -137,6 +140,25 @@ current Household, and returns a request identifier with status `planning`. It s
 Voice Request in one transaction: it does not create an Action Plan, Inventory Event, Snapshot
 change, or Audit Log. This lets the Action Plan workflow be developed before audio upload and STT.
 
+Action Plan generation loads that Voice Request and the Household's active items, calls the
+configured Planner outside a database transaction, then re-reads current inventory and validates
+the structured result before saving it. A successful Plan and the Voice Request transition to
+`waiting_confirmation` are committed together. Repeating the same request returns the existing Plan
+without another Provider call. Provider and validation failures leave no Plan and mark the Voice
+Request `failed` so it can be retried.
+
+The server only accepts Plan version `1.0`, `stock_in`/`stock_out`, positive quantities with at most
+three decimal places, explicit confirmation, unique Action IDs, and valid active Household item
+references. It rechecks official names, default units, duplicate Actions, confidence rules, and
+negative inventory in Action order. Unit conversion rules are not yet persisted: a different raw
+unit must remain unresolved and require user input, while an AI-applied conversion is rejected.
+New or unmatched items also require user input.
+
+Set `OPENAI_API_KEY` outside source control to enable the OpenAI adapter. `LLM_PROVIDER` defaults to
+`openai`, and `OPENAI_MODEL` defaults to `gpt-5.6-sol` but can be overridden. Without a key the
+generation endpoint returns `503 PLANNER_NOT_CONFIGURED`; the rest of the application remains
+available.
+
 The current Alembic head is `20260728_0003`. It adds `voice_requests`, `action_plans`, and
 `item_aliases`. A Voice Request belongs to one Household, has an optional transcript/audio path for
 future audio states, and can have at most one Action Plan. Item Alias uniqueness is scoped to a
@@ -169,7 +191,9 @@ Deployment checklist:
 3. Set `DATABASE_URL` in the Render dashboard as a secret. Use a Neon branch **separate from the test
    branch** (e.g. `production`). Use `?ssl=require`; the app normalizes Neon connection strings
    (drops `channel_binding`, maps `sslmode`) automatically.
-4. The container runs `alembic upgrade head` on start, then serves `uvicorn app.main:app`. Render polls
+4. To enable Action Plan generation, set `OPENAI_API_KEY` as a Render secret. Optionally override
+   `OPENAI_MODEL`; never commit the key to `.env` or source control.
+5. The container runs `alembic upgrade head` on start, then serves `uvicorn app.main:app`. Render polls
    `/ready` (which checks the database) before routing traffic.
 
 The development seed (`app.scripts.seed`) is not run automatically; run it manually only against a

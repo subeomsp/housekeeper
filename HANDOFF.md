@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1 Action Plan 기반 구현 완료**. 다음은 Phase 3-2 Planner와 Action Plan 생성이며, 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19~20.
+현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1~3-2 Action Plan 생성 Backend 완료**. 다음은 Phase 3-3 Action Plan 조회·수정·삭제와 Flutter 확인 화면이며, 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19~20.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -1078,8 +1078,8 @@ Snapshot 변경을 만들지 않는다.
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | 3-1 | VoiceRequest·ActionPlan·ItemAlias 모델/Migration + 텍스트 Transcript 접수 API | ✅ 완료 |
-| 3-2 | Planner Provider 경계 + 엄격한 Plan Schema/검증 + Action Plan 생성 | ⏭ 다음 |
-| 3-3 | Action Plan 조회·Action 수정/삭제 + Flutter 확인 화면 | 대기 |
+| 3-2 | Planner Provider 경계 + 엄격한 Plan Schema/검증 + Action Plan 생성 | ✅ 완료 |
+| 3-3 | Action Plan 조회·Action 수정/삭제 + Flutter 확인 화면 | ⏭ 다음 |
 | 3-4 | 승인·Execute API + 멱등 실행 + Row Lock/단일 Transaction | 대기 |
 | 3-5 | 품목 후보 검색·미확정 처리 + 사용자 승인 ItemAlias 저장 | 대기 |
 
@@ -1126,8 +1126,73 @@ ActionPlan, InventoryEvent, Snapshot, AuditLog를 생성하거나 수정하지 �
 - `uv run alembic heads` → `20260728_0003 (head)`.
 - 빈 DB 기준 Offline SQL 생성으로 0001 → 0002 → 0003 Migration 연결을 확인했다.
 
-다음 3-2는 Planner가 Transcript를 엄격한 Action Plan Schema로 변환하되 DB 변경은
-하지 않는 경계를 만든다. Plan 생성이 성공하면 VoiceRequest를
-`waiting_confirmation`으로 전환하고, 실패하면 재시도 가능한 오류 상태를 기록하는
-흐름을 먼저 확정한다. 실제 LLM Provider와 키가 없더라도 테스트용 결정적 Planner로
-Service·API 계약을 검증할 수 있게 분리한다.
+이 기반 위에 3-2에서 Planner가 Transcript를 엄격한 Action Plan Schema로 변환하는
+경계를 구현했다. 실제 결과와 다음 연결점은 §20.5를 따른다.
+
+### 20.5 Phase 3-2 Planner와 Action Plan 생성
+
+`POST /api/v1/voice-requests/{request_id}/action-plan`
+
+Request Body는 없고 Phase 3-1에서 받은 `request_id`를 Path로 전달한다. 성공 시 `201`로
+`request_id`, `plan_id`, 원본 Transcript, 요약, `requires_confirmation: true`, Action
+목록, `approved: false`, `executed: false`, 생성 시각을 반환한다.
+
+처리 순서는 다음과 같다.
+
+1. 첫 번째 짧은 Transaction에서 현재 Household의 VoiceRequest를 Lock하고 기존 Plan을
+   확인한다. 기존 Plan이 있으면 Provider를 다시 호출하지 않고 같은 Plan을 반환한다.
+2. `planning` 또는 재시도 가능한 `failed` 상태와 Transcript 존재 여부를 확인하고,
+   현재 Household의 활성 품목·기본 단위·Snapshot 수량을 조회한다.
+3. DB Transaction을 닫은 상태에서 `InventoryPlannerProvider`를 호출한다. 기본 Adapter는
+   OpenAI Responses API의 Pydantic Structured Output을 사용하며, Provider 교체는
+   Service 변경 없이 가능하다.
+4. 두 번째 Transaction에서 VoiceRequest를 다시 Lock하고 최신 활성 품목·Snapshot으로
+   결과를 재검증한다. 통과하면 ActionPlan 저장과 VoiceRequest의
+   `waiting_confirmation` 전환을 함께 Commit한다.
+
+Backend 검증 범위:
+
+- Schema version `1.0`, `requires_confirmation=true`, Action 1~50개.
+- `stock_in`/`stock_out`만 허용하며 수량은 양수·정수 9자리·소수 3자리 이하다.
+- Action ID, 같은 품목/같은 유형 Action 중복을 거부한다.
+- 연결 ID가 현재 Household의 활성 품목인지, 공식 이름과 기본 단위가 현재 값과
+  일치하는지 확인한다.
+- Confidence 0.70 미만, 신규 품목, 미확정 단위는 `requires_user_input=true`여야 한다.
+- 현재 Snapshot에서 Action 순서대로 계산했을 때 음수가 되면 Plan을 거부한다.
+- 단위 변환 테이블은 아직 없으므로 AI가 `conversion_applied=true`로 임의 변환한
+  결과는 거부한다. 기본 단위와 다른 표현은 정규화 값을 비우고 사용자 확인 대상으로
+  남겨야 한다.
+
+거부 조건과 상태:
+
+- 다른 Household를 포함해 요청을 찾지 못하면 `404 VOICE_REQUEST_NOT_FOUND`.
+- 생성할 수 없는 상태나 Transcript 부재는 `409 VOICE_REQUEST_NOT_PLANNABLE`.
+- OpenAI Key가 없으면 `503 PLANNER_NOT_CONFIGURED`.
+- Provider 장애는 `502 ACTION_PLAN_PROVIDER_ERROR`.
+- Structured Output이 서버 안전성 검증에 실패하면 이슈 목록과 함께
+  `422 ACTION_PLAN_INVALID`.
+- Provider/검증 실패 시 ActionPlan은 저장하지 않고 VoiceRequest만 `failed`로
+  Commit하여 같은 API로 재시도할 수 있다.
+
+이번 단계에서는 ActionPlan 생성 또는 실패 상태만 저장한다. InventoryEvent,
+Inventory Snapshot, AuditLog는 변경하지 않으며 승인·실행도 하지 않는다.
+
+OpenAI 설정은 `LLM_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL`이며 실제 Key는
+레포에 저장하지 않는다. 2026-07-28 공식 문서를 기준으로 Responses API
+`responses.parse(..., text_format=PydanticModel)`와 `output_parsed`를 사용했다. 기본
+모델은 `gpt-5.6-sol`이고 환경변수로 교체할 수 있다.
+
+검증(2026-07-28):
+
+- `uv run pytest` → **99 passed, 13 skipped**. Skip은 `TEST_DATABASE_URL`이 없는
+  환경의 PostgreSQL Integration Test다.
+- `uv run ruff check .` 통과.
+- `uv run mypy app tests` → 81개 Source File, 이슈 0.
+- OpenAI SDK가 ActionPlan Pydantic 모델을 `additionalProperties=false`인 Strict JSON
+  Schema로 변환하는 것을 확인했다.
+- 이 환경에는 `OPENAI_API_KEY`가 없어 실제 유료 Provider 호출은 수행하지 않았다.
+
+다음 3-3은 저장된 Plan을 조회하고 Action을 개별 수정·삭제하는 API를 만든 뒤 Flutter
+`/action-plan/:requestId` 확인 화면에 연결한다. 수정 후에도 같은 서버 검증을 다시
+통과해야 하며, `requires_user_input=true`인 Action이 남아 있으면 실행 단계로 넘기지
+않는다.
