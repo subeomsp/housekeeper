@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료 — Render 배포 및 `/ready` 헬스체크 확인됨. 다음은 Phase 2.
+현재 단계: Phase 1 Backend 완료·배포됨. **Phase 2 (Flutter 앱) 진행 중** — 2-1(골격+재고목록), 2-2(품목상세) 완료, 다음은 2-3(입고/소비·목표수량). 상세는 아래 §19.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -931,3 +931,93 @@ Render 실행 설정, README 최종 동기화. 앱 런타임 `DATABASE_URL`은 �
 
 API 완료 보고는 코드를 읽지 않는 사용자가 제품 흐름을 검토할 수 있도록 사용처, 입력·출력, 내부 처리 순서, 실패 조건, 검토할 결정을 설명한다.
 ```
+
+## 19. Phase 2 (Flutter 앱) 진행 상황과 이어서 작업하는 법
+
+Phase 1 백엔드는 완료·배포되었고, 지금은 **Phase 2 Flutter 앱**을 구현 중이다.
+이 절만 읽으면 다른 컴퓨터에서 `git clone` 후 그대로 이어서 작업할 수 있다.
+
+### 19.1 배포/환경 사실 (그대로 사용)
+
+- Backend API(운영/개발): `https://housekeeper-vo2q.onrender.com` (Render Web Service, Docker, 수동 설정).
+  - 헬스체크 `GET /ready` → `{"status":"ready","database":"ok"}`.
+  - API prefix `/api/v1`. 인증 없음(Phase 1 설계, 고정 dev Household/User UUID).
+- DB: Neon 운영 브랜치. **Render 대시보드의 `DATABASE_URL` 시크릿**으로만 연결(레포에 없음).
+- 로컬 `backend/.env`(gitignore)에 `DATABASE_URL`=이 운영 브랜치, `TEST_DATABASE_URL`=test 브랜치가 들어있다. **다른 노트북에서는 이 `.env`를 새로 만들어야 한다**(값은 Neon 대시보드/Render 시크릿에서 복사). 프론트만 돌릴 거면 `.env` 불필요(아래 참고).
+- **중요(무인증 설계상 필수 셋업)**: 새 빈 DB는 `alembic upgrade head` 뒤 **반드시 seed 1회** 실행해야 고정 dev Household/User가 생겨 쓰기 API가 동작한다. 안 하면 품목/이벤트 생성이 `DATABASE_ERROR`(FK 위반)로 막힌다. 현재 운영 Neon 브랜치는 이미 seed 완료 + 데모 데이터(우유/맥주/제로콜라/계란/참치캔) 입고까지 되어 있으므로, **같은 브랜치를 계속 쓰면 추가 seed 불필요**.
+
+### 19.2 프론트엔드 위치와 실행 (다른 노트북 기준)
+
+- 코드: 레포 루트의 `frontend/` (Flutter). 상세 실행법은 `frontend/README.md`.
+- 사전 조건: Flutter 3.32.8+(Dart 3.8), macOS 타깃은 Xcode/CocoaPods.
+- 실행:
+  ```bash
+  cd frontend
+  flutter pub get
+  flutter run -d macos     # macOS 데스크톱 창으로 확인 (개발 결정: §아래)
+  ```
+- **API 주소**: `lib/core/config/app_config.dart`의 기본값이 위 Render URL로 박혀 있어 `.env` 없이 바로 붙는다.
+  다른 서버로 바꾸려면 실행 시 `--dart-define=API_BASE_URL=https://...` 주입 또는 그 파일 수정.
+- **개발 디바이스 = macOS 데스크톱**으로 결정함. 이유: Flutter 웹(Chrome)은 브라우저 CORS 때문에 Render 직접 호출이 막힌다(백엔드에 CORS 미들웨어 없음). 데스크톱 앱은 CORS 없음. 최종 타깃은 Android(Phase 5). macOS 아웃바운드 호출용 `network.client` 엔타이틀먼트는 이미 커밋됨(`frontend/macos/Runner/*.entitlements`).
+- 백그라운드로 `flutter run` 실행 시 stdin이 TTY가 아니라 `r`(hot reload) 키가 안 먹는다. 코드 반영은 앱을 종료 후 재실행하거나, 일반 터미널에서 `flutter run` 하고 `r`/`R`을 쓴다.
+
+### 19.3 프론트엔드 구조 (Feature 중심 + Riverpod + go_router + dio)
+
+```text
+frontend/lib/
+├── main.dart                       # ProviderScope로 앱 실행
+├── app/  app.dart · router.dart · theme.dart   # go_router StatefulShellRoute(하단탭)
+├── core/
+│   ├── config/app_config.dart      # API base URL (기본=Render, --dart-define로 override)
+│   ├── network/dio_client.dart     # 백엔드 에러 봉투 {error:{code,message,details}} → ApiException
+│   ├── network/api_providers.dart  # 공유 Dio provider
+│   ├── errors/api_exception.dart   # 단일 에러 타입
+│   ├── format/  quantity_format.dart · date_format.dart
+│   └── widgets/async_view.dart     # loading/empty/error/success 공통 위젯 (spec §26.1)
+└── features/
+    ├── shell/home_shell.dart       # 하단 네비 홈/재고/기록/설정
+    ├── home/ · settings/           # 홈/설정 (설정=현재 API 주소 표시)
+    ├── history/                    # 기록 탭 (placeholder → 2-4에서 구현)
+    └── inventory/
+        ├── domain/  inventory_item.dart · inventory_detail.dart
+        ├── data/inventory_api.dart # GET /inventory, GET /inventory/{id}
+        └── presentation/
+            ├── inventory_providers.dart   # list Provider + detail FutureProvider.family
+            ├── inventory_list_page.dart    # 재고 목록(검색·새로고침·0수량 강조·탭→상세)
+            ├── inventory_detail_page.dart  # 상세 헤더 + 최근 Event 10건
+            └── event_display.dart          # Event 타입 한글 라벨/부호 색상
+```
+
+- 상태관리 Riverpod **3.x**: `StateProvider`가 기본 export에서 빠졌으니 `Notifier`/`NotifierProvider`를 쓴다(검색 상태 예시 참고).
+- 새로고침은 `ref.invalidate(provider)`로 처리(당겨서 새로고침 + 버튼).
+- 라우트(spec §27.1 일부): `/home`, `/inventory`, `/inventory/:itemId`, `/history`, `/settings`. `/recording`·`/action-plan/:requestId`는 Phase 3~4.
+
+### 19.4 Phase 2 세부 우선순위 (수직 슬라이스)
+
+| 단계 | 내용 | API | 상태 |
+|---|---|---|---|
+| 2-1 | 골격 + core + **재고 목록** | `GET /inventory` | ✅ 완료 (커밋 `Phase 2-1`) |
+| 2-2 | **품목 상세** + 최근 Event | `GET /inventory/{id}` | ✅ 완료 (커밋 `Phase 2-2`) |
+| 2-3 | **수동 입고/소비 + 목표 수량 설정** | `POST /inventory-events`(stock_in/out), `PUT /inventory/{id}/quantity` | ⏭ 다음 |
+| 2-4 | **기록 목록** + Event 정정/취소 | `GET /inventory-events`, `PATCH`/`DELETE /inventory-events/{id}` | 대기 |
+| 2-5 | **품목 생성/수정/보관/복원** | `POST/PATCH/DELETE /inventory-items`, `POST .../restore` | 대기 |
+| 2-6 | 오류 상태·수동 새로고침 마감 + Phase 2 종료 | (횡단) | 대기 |
+
+Phase 2 완료 기준 체크리스트: product_spec.md **§61 Phase 2 항목** 및 스펙 §68 API 계약 참조.
+
+### 19.5 2-3 착수 지침 (바로 다음 작업)
+
+- 상세 화면(`inventory_detail_page.dart`)과 목록에 **입고/소비/목표수량 설정** 진입(버튼 또는 FAB)을 붙인다.
+- 입고/소비: 수량(>0)·메모 입력 → `POST /api/v1/inventory-events` body `{item_id,event_type:"stock_in"|"stock_out",quantity,unit,note?}`. 외부에서 허용되는 타입은 **stock_in/stock_out만**(그 외는 422). 단위는 품목 기본 단위를 기본값으로.
+- 목표 수량: 최종 수량(ge 0) 입력 → `PUT /api/v1/inventory/{id}/quantity` body `{quantity,unit,note?}`. 백엔드가 `target-current`를 계산해 adjustment_in/out 기록, 같으면 `changed:false`.
+- 성공 후 `ref.invalidate(inventoryDetailProvider(itemId))` + `ref.invalidate(inventoryListProvider)`로 갱신.
+- **음수 재고는 서버가 거부**(`INSUFFICIENT_INVENTORY` 등) → `ApiException.message`를 스낵바로 표시. 요청 중 버튼 비활성/중복 제출 방지.
+- 수량 입력은 소수 3자리까지 가능(백엔드 `decimal_places=3`). Decimal은 문자열이 아니라 숫자로 전송.
+
+### 19.6 검증/작업 관례
+
+- 프론트: `cd frontend && flutter analyze`(이슈 0 유지) + `flutter test`. 각 슬라이스 후 앱 재실행으로 실제 Render 데이터로 확인.
+- 백엔드 변경 시: `cd backend && uv run pytest && uv run ruff check . && uv run mypy app tests`.
+- Git: 슬라이스 단위 커밋(`Phase 2-N: ...`) 후 `git push origin main`. 저장소 `github.com/subeomsp/housekeeper`(main). 커밋 메시지 끝에 `Co-Authored-By: Claude ...` 유지.
+- 사용자는 코드가 아니라 **제품 흐름**을 검토한다. 각 단계 완료 시 AGENTS.md의 🤖 Assistant 헤더 형식으로 화면 흐름·입출력·거부 조건 중심으로 보고한다.
+- 절대 규칙: `.env`/시크릿 커밋 금지, DB 비밀번호 출력/에코 금지, 운영 Neon DB를 테스트에 사용 금지(테스트는 `TEST_DATABASE_URL`=test 브랜치).
