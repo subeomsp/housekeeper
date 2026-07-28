@@ -8,7 +8,14 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
-from app.models import ActionPlan, Inventory, InventoryEvent, InventoryItem, VoiceRequest
+from app.models import (
+    ActionPlan,
+    Inventory,
+    InventoryEvent,
+    InventoryItem,
+    ItemAlias,
+    VoiceRequest,
+)
 from app.providers import (
     InventoryPlannerProvider,
     PlannerProviderError,
@@ -25,9 +32,11 @@ from app.repositories.inventory_repository import (
     CurrentInventoryRecord,
     InventoryRepository,
 )
+from app.repositories.item_alias_repository import ItemAliasRepository
 from app.repositories.voice_request_repository import VoiceRequestRepository
 from app.schemas.action_plan import (
     ActionPlanActionUpdate,
+    ActionPlanNewItemUpdate,
     ActionPlanPayload,
     PlannerInventoryItem,
 )
@@ -138,6 +147,10 @@ class FakeActionPlanRepository(ActionPlanRepository):
 
 
 class FakeInventoryItemRepository(InventoryItemRepository):
+    def __init__(self) -> None:
+        self.created_items: list[InventoryItem] = []
+        self.created_snapshots: list[Inventory] = []
+
     async def list_active_for_planner(
         self,
         session: AsyncSession,
@@ -158,6 +171,49 @@ class FakeInventoryItemRepository(InventoryItemRepository):
                 current_quantity=Decimal("1"),
             )
         ]
+
+    async def normalized_name_exists(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        normalized_name: str,
+        exclude_item_id: UUID | None = None,
+    ) -> bool:
+        del session, household_id, exclude_item_id
+        return any(
+            item.normalized_name == normalized_name for item in self.created_items
+        )
+
+    async def get_by_normalized_name(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        normalized_name: str,
+    ) -> InventoryItem | None:
+        del session, household_id
+        return next(
+            (
+                item
+                for item in self.created_items
+                if item.normalized_name == normalized_name
+            ),
+            None,
+        )
+
+    async def add_with_snapshot(
+        self,
+        session: AsyncSession,
+        *,
+        item: InventoryItem,
+        snapshot: Inventory,
+    ) -> None:
+        del session
+        item.created_at = CREATED_AT
+        item.updated_at = CREATED_AT
+        self.created_items.append(item)
+        self.created_snapshots.append(snapshot)
 
 
 class FakeInventoryRepository(InventoryRepository):
@@ -187,7 +243,7 @@ class FakeInventoryRepository(InventoryRepository):
     ) -> list[CurrentInventoryRecord]:
         del session
         self.locked_item_ids = item_ids
-        return [self.record]
+        return [self.record] if ITEM_ID in item_ids else []
 
     async def save_snapshot(
         self,
@@ -219,6 +275,50 @@ class FakeAuditLogRepository:
     async def add(self, session: AsyncSession, **kwargs: Any) -> None:
         del session
         self.actions.append(cast(str, kwargs["action"]))
+
+
+class FakeItemAliasRepository(ItemAliasRepository):
+    def __init__(self) -> None:
+        self.aliases: list[ItemAlias] = []
+
+    async def list_for_household(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+    ) -> dict[UUID, list[ItemAlias]]:
+        del session, household_id
+        grouped: dict[UUID, list[ItemAlias]] = {}
+        for alias in self.aliases:
+            grouped.setdefault(alias.inventory_item_id, []).append(alias)
+        return grouped
+
+    async def get_by_normalized_alias(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        normalized_alias: str,
+    ) -> ItemAlias | None:
+        del session, household_id
+        return next(
+            (
+                alias
+                for alias in self.aliases
+                if alias.normalized_alias == normalized_alias
+            ),
+            None,
+        )
+
+    async def add(
+        self,
+        session: AsyncSession,
+        *,
+        alias: ItemAlias,
+    ) -> None:
+        del session
+        alias.created_at = CREATED_AT
+        self.aliases.append(alias)
 
 
 class FakePlanner:
@@ -268,6 +368,48 @@ class FakePlanner:
         )
 
 
+class FakeNewItemPlanner:
+    async def create_action_plan(
+        self,
+        *,
+        transcript: str,
+        inventory_context: list[PlannerInventoryItem],
+    ) -> ActionPlanPayload:
+        del inventory_context
+        return ActionPlanPayload.model_validate(
+            {
+                "version": "1.0",
+                "transcript": transcript,
+                "summary": "아몬드 음료 2개 입고",
+                "requires_confirmation": True,
+                "actions": [
+                    {
+                        "action_id": "a1",
+                        "type": "stock_in",
+                        "item": {
+                            "raw_name": "아몬드",
+                            "matched_item_id": None,
+                            "matched_name": None,
+                            "is_new_item": True,
+                            "new_item": None,
+                        },
+                        "quantity": {
+                            "raw_value": 2,
+                            "raw_unit": "개",
+                            "normalized_value": None,
+                            "normalized_unit": None,
+                            "conversion_applied": False,
+                            "conversion_reason": None,
+                        },
+                        "confidence": 0.6,
+                        "warnings": [],
+                        "requires_user_input": True,
+                    }
+                ],
+            }
+        )
+
+
 def build_service(
     voice_repository: FakeVoiceRequestRepository,
     plan_repository: FakeActionPlanRepository,
@@ -277,6 +419,7 @@ def build_service(
         action_plan_repository=plan_repository,
         inventory_item_repository=FakeInventoryItemRepository(),
         validator=ActionPlanValidator(),
+        item_alias_repository=FakeItemAliasRepository(),
     )
 
 
@@ -457,6 +600,7 @@ async def test_execute_updates_snapshot_and_is_idempotent() -> None:
         inventory_repository=inventory_repository,
         inventory_event_repository=event_repository,
         audit_log_repository=cast(AuditLogRepository, audit_repository),
+        item_alias_repository=FakeItemAliasRepository(),
     )
     session = cast(AsyncSession, FakeSession())
     await service.generate(
@@ -493,3 +637,101 @@ async def test_execute_updates_snapshot_and_is_idempotent() -> None:
     assert second.event_count == 0
     assert second.already_executed is True
     assert voice_repository.request.status == "completed"
+
+
+async def test_confirmed_new_item_is_created_with_first_event_and_alias() -> None:
+    voice_repository = FakeVoiceRequestRepository()
+    plan_repository = FakeActionPlanRepository()
+    item_repository = FakeInventoryItemRepository()
+    inventory_repository = FakeInventoryRepository()
+    event_repository = FakeInventoryEventRepository()
+    audit_repository = FakeAuditLogRepository()
+    alias_repository = FakeItemAliasRepository()
+    service = ActionPlanService(
+        voice_request_repository=voice_repository,
+        action_plan_repository=plan_repository,
+        inventory_item_repository=item_repository,
+        validator=ActionPlanValidator(),
+        inventory_repository=inventory_repository,
+        inventory_event_repository=event_repository,
+        audit_log_repository=cast(AuditLogRepository, audit_repository),
+        item_alias_repository=alias_repository,
+    )
+    session = cast(AsyncSession, FakeSession())
+    await service.generate(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        provider=cast(InventoryPlannerProvider, FakeNewItemPlanner()),
+    )
+    resolved = await service.resolve_new_item(
+        session,
+        household_id=HOUSEHOLD_ID,
+        request_id=REQUEST_ID,
+        action_id="a1",
+        data=ActionPlanNewItemUpdate(
+            type="stock_in",
+            name="아몬드브리즈",
+            default_unit="개",
+            category="음료",
+            quantity=2,
+            remember_alias=True,
+        ),
+    )
+
+    result = await service.execute(
+        session,
+        household_id=HOUSEHOLD_ID,
+        user_id=USER_ID,
+        request_id=REQUEST_ID,
+    )
+
+    assert resolved.payload.actions[0].item.new_item is not None
+    assert len(item_repository.created_items) == 1
+    assert item_repository.created_items[0].name == "아몬드브리즈"
+    assert item_repository.created_snapshots[0].quantity == 2
+    assert len(event_repository.events) == 1
+    assert event_repository.events[0].item_id == item_repository.created_items[0].id
+    assert event_repository.events[0].signed_quantity == 2
+    assert [(alias.alias, alias.source) for alias in alias_repository.aliases] == [
+        ("아몬드", "voice_confirmation")
+    ]
+    assert audit_repository.actions == [
+        "inventory_item_created",
+        "inventory_event_created",
+        "action_plan_approved",
+    ]
+    assert result.event_count == 1
+
+
+async def test_exact_confirmed_alias_resolves_before_candidate_inference() -> None:
+    payload = await FakeNewItemPlanner().create_action_plan(
+        transcript="아몬드 두 개 사왔어.",
+        inventory_context=[],
+    )
+    item_repository = FakeInventoryItemRepository()
+    inventory_records = await item_repository.list_active_for_planner(
+        cast(AsyncSession, FakeSession()),
+        household_id=HOUSEHOLD_ID,
+    )
+    alias = ItemAlias(
+        id=UUID("00000000-0000-4000-8000-000000000333"),
+        household_id=HOUSEHOLD_ID,
+        inventory_item_id=ITEM_ID,
+        alias="아몬드",
+        normalized_alias="아몬드",
+        source="voice_confirmation",
+    )
+
+    matched = ActionPlanService._apply_exact_item_matches(
+        payload=payload,
+        inventory_records=inventory_records,
+        aliases_by_item={ITEM_ID: [alias]},
+    )
+
+    action = matched.actions[0]
+    assert action.item.matched_item_id == ITEM_ID
+    assert action.item.matched_name == "우유"
+    assert action.item.is_new_item is False
+    assert action.quantity.normalized_value == 2
+    assert action.requires_user_input is True

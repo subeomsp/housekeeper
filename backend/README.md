@@ -11,7 +11,8 @@ Transcript entry API. Action Plan generation is available through a provider-neu
 interface with an OpenAI Responses API adapter and strict Structured Output validation. Review,
 editing, approval, and idempotent execution are connected. Mutations follow the Phase 1
 Event/Snapshot transaction rules, and neither text entry nor Plan generation changes inventory
-before explicit approval.
+before explicit approval. Confirmed voice expressions can be remembered as Household-scoped item
+aliases, and reviewed new items are created atomically with their first inventory event.
 
 ## Requirements
 
@@ -93,6 +94,7 @@ POST   /api/v1/voice-requests/text
 POST   /api/v1/voice-requests/{request_id}/action-plan
 GET    /api/v1/action-plan/{request_id}
 PATCH  /api/v1/action-plan/{request_id}/actions/{action_id}
+POST   /api/v1/action-plan/{request_id}/actions/{action_id}/new-item
 DELETE /api/v1/action-plan/{request_id}/actions/{action_id}
 POST   /api/v1/action-plan/{request_id}/execute
 ```
@@ -177,6 +179,18 @@ creates `voice`-sourced Events, updates Snapshots, writes Event and Plan approva
 the Plan executed and Voice Request completed. `set_quantity` becomes an adjustment Event for the
 difference; a no-op target creates no Event. Repeating or concurrently submitting an already
 executed Plan succeeds without creating duplicate Events.
+
+The Planner context includes confirmed aliases for each active item. After Provider output, the
+backend deterministically rechecks exact normalized official names first and exact normalized
+aliases second before candidate inference is accepted. An alias is only stored when the user checks
+the remember option while linking an Action; it uses source `voice_confirmation`. Official-name or
+alias conflicts within the Household return `ITEM_ALIAS_CONFLICT`.
+
+Reviewing an unresolved Action as a new item stores only its proposed official name, default unit,
+optional category, quantity, and remember choice in the Plan. The item is not created during review.
+On Execute, the item, zero Snapshot, optional Alias, first voice Event, updated Snapshot, audits, and
+Plan state are committed together. A new item cannot begin with `stock_out`, and duplicate new names
+inside one Plan are rejected.
 
 Set `OPENAI_API_KEY` outside source control to enable the OpenAI adapter. `LLM_PROVIDER` defaults to
 `openai`, and `OPENAI_MODEL` defaults to `gpt-5.6-sol` but can be overridden. Without a key the

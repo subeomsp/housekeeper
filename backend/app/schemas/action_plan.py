@@ -25,11 +25,40 @@ class ActionPlanWarning(StrictModel):
         return stripped
 
 
+class ActionPlanNewItemDefinition(StrictModel):
+    name: str = Field(min_length=1, max_length=100)
+    default_unit: str = Field(min_length=1, max_length=20)
+    category: str | None = Field(default=None, max_length=50)
+    remember_alias: bool = False
+
+    @field_validator("name", "default_unit")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("신규 품목 값은 빈 문자열일 수 없습니다.")
+        return stripped
+
+    @field_validator("category")
+    @classmethod
+    def strip_category(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @model_validator(mode="after")
+    def validate_searchable_name(self) -> "ActionPlanNewItemDefinition":
+        if not any(character.isalnum() for character in self.name):
+            raise ValueError("품목명에는 문자 또는 숫자가 포함되어야 합니다.")
+        return self
+
+
 class ActionPlanItemReference(StrictModel):
     raw_name: str = Field(min_length=1, max_length=100)
     matched_item_id: UUID | None
     matched_name: str | None = Field(default=None, min_length=1, max_length=100)
     is_new_item: bool
+    new_item: ActionPlanNewItemDefinition | None = None
 
     @field_validator("raw_name", "matched_name")
     @classmethod
@@ -46,8 +75,11 @@ class ActionPlanItemReference(StrictModel):
         if self.is_new_item:
             if self.matched_item_id is not None or self.matched_name is not None:
                 raise ValueError("신규 품목에는 기존 품목 연결 값을 지정할 수 없습니다.")
-        elif self.matched_item_id is None or self.matched_name is None:
-            raise ValueError("기존 품목에는 품목 ID와 공식 이름이 필요합니다.")
+        else:
+            if self.matched_item_id is None or self.matched_name is None:
+                raise ValueError("기존 품목에는 품목 ID와 공식 이름이 필요합니다.")
+            if self.new_item is not None:
+                raise ValueError("기존 품목에는 신규 품목 정의를 지정할 수 없습니다.")
         return self
 
 
@@ -172,6 +204,7 @@ class ActionPlanActionUpdate(BaseModel):
     item_id: UUID
     quantity: float = Field(ge=0, le=999_999_999.999)
     unit: str = Field(min_length=1, max_length=20)
+    remember_alias: bool = False
 
     @field_validator("quantity")
     @classmethod
@@ -193,8 +226,46 @@ class ActionPlanActionUpdate(BaseModel):
         return self
 
 
+class ActionPlanNewItemUpdate(BaseModel):
+    type: Literal["stock_in", "stock_out", "set_quantity"]
+    name: str = Field(min_length=1, max_length=100)
+    default_unit: str = Field(min_length=1, max_length=20)
+    category: str | None = Field(default=None, max_length=50)
+    quantity: float = Field(ge=0, le=999_999_999.999)
+    remember_alias: bool = False
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity_precision(cls, value: float) -> float:
+        return ActionPlanQuantity.validate_quantity_precision(value) or 0
+
+    @field_validator("name", "default_unit")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("신규 품목 값은 빈 문자열일 수 없습니다.")
+        return stripped
+
+    @field_validator("category")
+    @classmethod
+    def strip_category(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @model_validator(mode="after")
+    def validate_new_item(self) -> "ActionPlanNewItemUpdate":
+        if not any(character.isalnum() for character in self.name):
+            raise ValueError("품목명에는 문자 또는 숫자가 포함되어야 합니다.")
+        if self.type in {"stock_in", "stock_out"} and self.quantity <= 0:
+            raise ValueError("입고와 소비 수량은 0보다 커야 합니다.")
+        return self
+
+
 class PlannerInventoryItem(BaseModel):
     item_id: UUID
     name: str
     default_unit: str
     current_quantity: Quantity
+    aliases: list[str] = Field(default_factory=list)

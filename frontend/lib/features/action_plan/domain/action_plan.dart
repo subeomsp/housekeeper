@@ -34,14 +34,16 @@ class ActionPlanItemReference {
     required this.matchedItemId,
     required this.matchedName,
     required this.isNewItem,
+    this.newItem,
   });
 
   final String rawName;
   final String? matchedItemId;
   final String? matchedName;
   final bool isNewItem;
+  final ActionPlanNewItemDefinition? newItem;
 
-  String get displayName => matchedName ?? rawName;
+  String get displayName => newItem?.name ?? matchedName ?? rawName;
 
   factory ActionPlanItemReference.fromJson(Map<String, dynamic> json) {
     return ActionPlanItemReference(
@@ -49,6 +51,34 @@ class ActionPlanItemReference {
       matchedItemId: json['matched_item_id'] as String?,
       matchedName: json['matched_name'] as String?,
       isNewItem: json['is_new_item'] as bool,
+      newItem: json['new_item'] == null
+          ? null
+          : ActionPlanNewItemDefinition.fromJson(
+              json['new_item'] as Map<String, dynamic>,
+            ),
+    );
+  }
+}
+
+class ActionPlanNewItemDefinition {
+  const ActionPlanNewItemDefinition({
+    required this.name,
+    required this.defaultUnit,
+    required this.category,
+    required this.rememberAlias,
+  });
+
+  final String name;
+  final String defaultUnit;
+  final String? category;
+  final bool rememberAlias;
+
+  factory ActionPlanNewItemDefinition.fromJson(Map<String, dynamic> json) {
+    return ActionPlanNewItemDefinition(
+      name: json['name'] as String,
+      defaultUnit: json['default_unit'] as String,
+      category: json['category'] as String?,
+      rememberAlias: json['remember_alias'] as bool,
     );
   }
 }

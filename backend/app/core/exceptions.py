@@ -218,3 +218,12 @@ def action_plan_requires_action_error(request_id: str) -> AppError:
         status_code=409,
         details={"request_id": request_id},
     )
+
+
+def item_alias_conflict_error(alias: str, item_id: str) -> AppError:
+    return AppError(
+        code="ITEM_ALIAS_CONFLICT",
+        message="이 음성 표현은 이미 다른 품목에 연결되어 있습니다.",
+        status_code=409,
+        details={"alias": alias, "existing_item_id": item_id},
+    )

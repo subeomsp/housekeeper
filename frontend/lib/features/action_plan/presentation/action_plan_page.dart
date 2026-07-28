@@ -33,12 +33,6 @@ class _ActionPlanPageState extends ConsumerState<ActionPlanPage> {
     try {
       final items = await ref.read(actionPlanInventoryItemsProvider.future);
       if (!mounted) return;
-      if (items.isEmpty) {
-        throw const ApiException(
-          code: 'NO_ACTIVE_ITEMS',
-          message: '수정에 사용할 활성 품목이 없어요.',
-        );
-      }
       final result = await showActionPlanEditSheet(
         context: context,
         api: ref.read(actionPlanApiProvider),
@@ -341,9 +335,13 @@ class _ActionCard extends StatelessWidget {
                 ),
               ),
             if (action.item.isNewItem)
-              const Padding(
+              Padding(
                 padding: EdgeInsets.only(top: 6),
-                child: Text('기존 품목을 선택하거나 신규 품목 확인이 필요해요.'),
+                child: Text(
+                  action.item.newItem == null
+                      ? '기존 품목을 선택하거나 신규 품목 확인이 필요해요.'
+                      : '실행할 때 새 품목과 첫 재고 기록을 함께 만들어요.',
+                ),
               ),
             const SizedBox(height: 10),
             if (mutating)

@@ -7,6 +7,7 @@ from app.api.dependencies import CurrentHouseholdId, CurrentUserId, DatabaseSess
 from app.schemas.action_plan import (
     ActionPlanActionUpdate,
     ActionPlanExecutionResponse,
+    ActionPlanNewItemUpdate,
     ActionPlanResponse,
 )
 from app.services.action_plan_service import (
@@ -50,6 +51,28 @@ async def update_action_plan_action(
     service: ActionPlanServiceDependency,
 ) -> ActionPlanResponse:
     result = await service.update_action(
+        session,
+        household_id=household_id,
+        request_id=request_id,
+        action_id=action_id,
+        data=data,
+    )
+    return _response(result)
+
+
+@router.post(
+    "/{request_id}/actions/{action_id}/new-item",
+    response_model=ActionPlanResponse,
+)
+async def resolve_action_plan_new_item(
+    request_id: UUID,
+    action_id: str,
+    data: ActionPlanNewItemUpdate,
+    session: DatabaseSession,
+    household_id: CurrentHouseholdId,
+    service: ActionPlanServiceDependency,
+) -> ActionPlanResponse:
+    result = await service.resolve_new_item(
         session,
         household_id=household_id,
         request_id=request_id,

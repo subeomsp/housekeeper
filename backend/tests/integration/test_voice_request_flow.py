@@ -11,6 +11,7 @@ from app.models import (
     Inventory,
     InventoryEvent,
     InventoryItem,
+    ItemAlias,
     User,
     VoiceRequest,
 )
@@ -19,6 +20,7 @@ from app.repositories.inventory_item_repository import InventoryItemRepository
 from app.repositories.voice_request_repository import VoiceRequestRepository
 from app.schemas.action_plan import (
     ActionPlanActionUpdate,
+    ActionPlanNewItemUpdate,
     ActionPlanPayload,
     PlannerInventoryItem,
 )
@@ -92,6 +94,48 @@ class FakePlanner:
                         "confidence": 0.98,
                         "warnings": [],
                         "requires_user_input": False,
+                    }
+                ],
+            }
+        )
+
+
+class FakeNewItemPlanner:
+    async def create_action_plan(
+        self,
+        *,
+        transcript: str,
+        inventory_context: list[PlannerInventoryItem],
+    ) -> ActionPlanPayload:
+        del inventory_context
+        return ActionPlanPayload.model_validate(
+            {
+                "version": "1.0",
+                "transcript": transcript,
+                "summary": "아몬드 음료 2개 입고",
+                "requires_confirmation": True,
+                "actions": [
+                    {
+                        "action_id": "a1",
+                        "type": "stock_in",
+                        "item": {
+                            "raw_name": "아몬드",
+                            "matched_item_id": None,
+                            "matched_name": None,
+                            "is_new_item": True,
+                            "new_item": None,
+                        },
+                        "quantity": {
+                            "raw_value": 2,
+                            "raw_unit": "개",
+                            "normalized_value": None,
+                            "normalized_unit": None,
+                            "conversion_applied": False,
+                            "conversion_reason": None,
+                        },
+                        "confidence": 0.6,
+                        "warnings": [],
+                        "requires_user_input": True,
                     }
                 ],
             }
@@ -282,3 +326,72 @@ async def test_edited_plan_executes_once_with_event_snapshot_and_audit(
         "inventory_event_created",
         "action_plan_approved",
     }
+
+
+async def test_confirmed_new_item_is_created_atomically_on_execute(
+    db_session: AsyncSession,
+    household: UUID,
+) -> None:
+    request = await VoiceRequestService(VoiceRequestRepository()).create_text_request(
+        db_session,
+        household_id=household,
+        data=TextVoiceRequestCreate(transcript="아몬드 두 개 사왔어."),
+    )
+    service = ActionPlanService(
+        voice_request_repository=VoiceRequestRepository(),
+        action_plan_repository=ActionPlanRepository(),
+        inventory_item_repository=InventoryItemRepository(),
+        validator=ActionPlanValidator(),
+    )
+    await service.generate(
+        db_session,
+        household_id=household,
+        request_id=request.request_id,
+        provider=FakeNewItemPlanner(),
+    )
+    await service.resolve_new_item(
+        db_session,
+        household_id=household,
+        request_id=request.request_id,
+        action_id="a1",
+        data=ActionPlanNewItemUpdate(
+            type="stock_in",
+            name="아몬드브리즈",
+            default_unit="개",
+            category="음료",
+            quantity=2,
+            remember_alias=True,
+        ),
+    )
+    result = await service.execute(
+        db_session,
+        household_id=household,
+        user_id=USER_ID,
+        request_id=request.request_id,
+    )
+
+    item = await db_session.scalar(
+        select(InventoryItem).where(
+            InventoryItem.household_id == household,
+            InventoryItem.normalized_name == "아몬드브리즈",
+        )
+    )
+    assert item is not None
+    snapshot = await db_session.scalar(
+        select(Inventory).where(Inventory.item_id == item.id)
+    )
+    event = await db_session.scalar(
+        select(InventoryEvent).where(InventoryEvent.item_id == item.id)
+    )
+    alias = await db_session.scalar(
+        select(ItemAlias).where(ItemAlias.inventory_item_id == item.id)
+    )
+    assert result.event_count == 1
+    assert snapshot is not None
+    assert snapshot.quantity == 2
+    assert event is not None
+    assert event.signed_quantity == 2
+    assert event.source == "voice"
+    assert alias is not None
+    assert alias.alias == "아몬드"
+    assert alias.source == "voice_confirmation"

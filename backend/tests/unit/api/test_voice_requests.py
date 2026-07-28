@@ -84,6 +84,7 @@ async def test_generate_action_plan_returns_confirmation_payload(
                         "matched_item_id": REQUEST_ID,
                         "matched_name": "우유",
                         "is_new_item": False,
+                        "new_item": None,
                     },
                     "quantity": {
                         "raw_value": 2,
@@ -133,6 +134,7 @@ async def test_generate_action_plan_returns_confirmation_payload(
                     "matched_item_id": str(REQUEST_ID),
                     "matched_name": "우유",
                     "is_new_item": False,
+                    "new_item": None,
                 },
                 "quantity": {
                     "raw_value": 2.0,

@@ -54,6 +54,52 @@ void main() {
     expect(api.updatedQuantity, 0);
     expect(api.updatedUnit, '개');
   });
+
+  testWidgets('confirms an unresolved action as a remembered new item', (
+    tester,
+  ) async {
+    final plan = _newItemPlan();
+    final api = _FakeActionPlanApi(plan);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () => showActionPlanEditSheet(
+                context: context,
+                api: api,
+                requestId: 'request-id',
+                action: plan.actions.first,
+                items: const [],
+              ),
+              child: const Text('열기'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('열기'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextFormField, '새 품목 이름'),
+      '아몬드브리즈',
+    );
+    await tester.enterText(find.widgetWithText(TextFormField, '기본 단위'), '개');
+    await tester.enterText(find.widgetWithText(TextFormField, '카테고리'), '음료');
+    await tester.ensureVisible(find.byType(Checkbox));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(Checkbox));
+    await tester.ensureVisible(find.widgetWithText(FilledButton, '완료'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '완료'));
+    await tester.pumpAndSettle();
+
+    expect(api.newItemName, '아몬드브리즈');
+    expect(api.newItemUnit, '개');
+    expect(api.newItemCategory, '음료');
+    expect(api.rememberAlias, isTrue);
+  });
 }
 
 ActionPlan _plan() {
@@ -93,6 +139,44 @@ ActionPlan _plan() {
   );
 }
 
+ActionPlan _newItemPlan() {
+  final plan = _plan();
+  return ActionPlan(
+    requestId: plan.requestId,
+    planId: plan.planId,
+    version: plan.version,
+    transcript: '아몬드 두 개 사왔어.',
+    summary: '신규 품목 확인 필요',
+    requiresConfirmation: true,
+    actions: [
+      ActionPlanAction(
+        actionId: 'a1',
+        type: ActionPlanType.stockIn,
+        item: const ActionPlanItemReference(
+          rawName: '아몬드',
+          matchedItemId: null,
+          matchedName: null,
+          isNewItem: true,
+        ),
+        quantity: const ActionPlanQuantity(
+          rawValue: 2,
+          rawUnit: '개',
+          normalizedValue: null,
+          normalizedUnit: null,
+          conversionApplied: false,
+          conversionReason: null,
+        ),
+        confidence: 0.6,
+        warnings: const [],
+        requiresUserInput: true,
+      ),
+    ],
+    approved: false,
+    executed: false,
+    createdAt: plan.createdAt,
+  );
+}
+
 class _FakeActionPlanApi extends ActionPlanApi {
   _FakeActionPlanApi(this.plan) : super(Dio());
 
@@ -100,6 +184,10 @@ class _FakeActionPlanApi extends ActionPlanApi {
   ActionPlanType? updatedType;
   num? updatedQuantity;
   String? updatedUnit;
+  String? newItemName;
+  String? newItemUnit;
+  String? newItemCategory;
+  bool? rememberAlias;
 
   @override
   Future<ActionPlan> updateAction({
@@ -109,10 +197,29 @@ class _FakeActionPlanApi extends ActionPlanApi {
     required String itemId,
     required num quantity,
     required String unit,
+    bool rememberAlias = false,
   }) async {
     updatedType = type;
     updatedQuantity = quantity;
     updatedUnit = unit;
+    return plan;
+  }
+
+  @override
+  Future<ActionPlan> resolveNewItem({
+    required String requestId,
+    required String actionId,
+    required ActionPlanType type,
+    required String name,
+    required String defaultUnit,
+    required num quantity,
+    String? category,
+    bool rememberAlias = false,
+  }) async {
+    newItemName = name;
+    newItemUnit = defaultUnit;
+    newItemCategory = category;
+    this.rememberAlias = rememberAlias;
     return plan;
   }
 }

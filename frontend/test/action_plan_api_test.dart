@@ -35,6 +35,16 @@ void main() {
       quantity: 0,
       unit: '개',
     );
+    await api.resolveNewItem(
+      requestId: 'request-id',
+      actionId: 'a1',
+      type: ActionPlanType.stockIn,
+      name: '아몬드브리즈',
+      defaultUnit: '개',
+      category: '음료',
+      quantity: 2,
+      rememberAlias: true,
+    );
     await api.deleteAction(requestId: 'request-id', actionId: 'a2');
 
     expect(adapter.requests[0].method, 'GET');
@@ -46,9 +56,23 @@ void main() {
       'item_id': 'item-id',
       'quantity': 0,
       'unit': '개',
+      'remember_alias': false,
     });
-    expect(adapter.requests[2].method, 'DELETE');
-    expect(adapter.requests[2].path, '/action-plan/request-id/actions/a2');
+    expect(adapter.requests[2].method, 'POST');
+    expect(
+      adapter.requests[2].path,
+      '/action-plan/request-id/actions/a1/new-item',
+    );
+    expect(adapter.requests[2].data, {
+      'type': 'stock_in',
+      'name': '아몬드브리즈',
+      'default_unit': '개',
+      'category': '음료',
+      'quantity': 2,
+      'remember_alias': true,
+    });
+    expect(adapter.requests[3].method, 'DELETE');
+    expect(adapter.requests[3].path, '/action-plan/request-id/actions/a2');
   });
 }
 

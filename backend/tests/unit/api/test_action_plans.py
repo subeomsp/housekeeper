@@ -117,6 +117,32 @@ async def test_delete_action_returns_remaining_plan(
     service.delete_action.assert_awaited_once()
 
 
+async def test_confirm_new_item_forwards_reviewed_definition(
+    app: FastAPI,
+    client: AsyncClient,
+) -> None:
+    service = MagicMock(spec=ActionPlanService)
+    service.resolve_new_item = AsyncMock(return_value=plan_view())
+    app.dependency_overrides[get_action_plan_service] = lambda: service
+
+    response = await client.post(
+        f"/api/v1/action-plan/{REQUEST_ID}/actions/a1/new-item",
+        json={
+            "type": "stock_in",
+            "name": "아몬드브리즈",
+            "default_unit": "개",
+            "category": "음료",
+            "quantity": 2,
+            "remember_alias": True,
+        },
+    )
+
+    assert response.status_code == 200
+    call = service.resolve_new_item.await_args.kwargs
+    assert call["data"].name == "아몬드브리즈"
+    assert call["data"].remember_alias is True
+
+
 async def test_execute_action_plan_returns_idempotency_result(
     app: FastAPI,
     client: AsyncClient,

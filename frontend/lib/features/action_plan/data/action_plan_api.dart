@@ -42,6 +42,7 @@ class ActionPlanApi {
     required String itemId,
     required num quantity,
     required String unit,
+    bool rememberAlias = false,
   }) async {
     try {
       final response = await _dio.patch<Map<String, dynamic>>(
@@ -51,6 +52,37 @@ class ActionPlanApi {
           'item_id': itemId,
           'quantity': quantity,
           'unit': unit,
+          'remember_alias': rememberAlias,
+        },
+      );
+      return ActionPlan.fromJson(response.data ?? const {});
+    } on DioException catch (error) {
+      throw mapDioError(error);
+    }
+  }
+
+  Future<ActionPlan> resolveNewItem({
+    required String requestId,
+    required String actionId,
+    required ActionPlanType type,
+    required String name,
+    required String defaultUnit,
+    required num quantity,
+    String? category,
+    bool rememberAlias = false,
+  }) async {
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        '/action-plan/$requestId/actions/$actionId/new-item',
+        data: {
+          'type': type.apiValue,
+          'name': name,
+          'default_unit': defaultUnit,
+          'category': category == null || category.trim().isEmpty
+              ? null
+              : category.trim(),
+          'quantity': quantity,
+          'remember_alias': rememberAlias,
         },
       );
       return ActionPlan.fromJson(response.data ?? const {});

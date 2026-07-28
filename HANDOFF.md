@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1~3-4 Action Plan 생성·확인·편집·실행 완료**. 다음은 Phase 3-5 품목 후보·Alias 승인 흐름이며, 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19~20.
+현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**, **Phase 3-1~3-5 Action Plan·품목 후보·Alias 승인 흐름 완료**. 다음은 product_spec §42·§69.4의 Phase 3-6 품목별 단위 변환 규칙이며, 실제 음성 대신 텍스트 입력으로 검증 중이다. 상세는 아래 §19~20.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -1081,7 +1081,8 @@ Snapshot 변경을 만들지 않는다.
 | 3-2 | Planner Provider 경계 + 엄격한 Plan Schema/검증 + Action Plan 생성 | ✅ 완료 |
 | 3-3 | Action Plan 조회·Action 수정/삭제 + Flutter 확인 화면 | ✅ 완료 |
 | 3-4 | 승인·Execute API + 멱등 실행 + Row Lock/단일 Transaction | ✅ 완료 |
-| 3-5 | 품목 후보 검색·미확정 처리 + 사용자 승인 ItemAlias 저장 | ⏭ 다음 |
+| 3-5 | 품목 후보 검색·미확정 처리 + 사용자 승인 ItemAlias 저장 | ✅ 완료 |
+| 3-6 | 품목별 단위 변환 규칙 + 사용자 확인 이력 | ⏭ 다음 |
 
 ### 20.2 Phase 3-1 구현 결과
 
@@ -1317,6 +1318,68 @@ Snapshot과 Event를 다시 읽는다.
 - Flutter `flutter test` → 전체 통과.
 - `git diff --check` 통과.
 
-다음 3-5는 신규/미확정 품목 후보를 사용자가 기존 품목에 연결하거나 생성 승인하는
-흐름과, 그 승인을 근거로 ItemAlias를 저장하는 범위다. 현재 Execute는 이 입력들이
-미확정인 Plan을 실행하지 않는다.
+3-5에서는 신규/미확정 품목 후보를 사용자가 기존 품목에 연결하거나 생성 승인하는
+흐름과, 그 승인을 근거로 ItemAlias를 저장한다. 상세는 다음 절을 따른다.
+
+### 20.8 Phase 3-5 품목 후보·신규 품목·ItemAlias
+
+기존 Action 수정 API에 `remember_alias` 선택값을 추가했고, 신규 품목 확인 API를
+추가했다.
+
+```text
+PATCH /api/v1/action-plan/{request_id}/actions/{action_id}
+POST  /api/v1/action-plan/{request_id}/actions/{action_id}/new-item
+```
+
+기존 품목을 선택하면 현재 공식 이름·기본 단위로 Action을 다시 구성한다. 사용자가
+`remember_alias=true`를 명시했을 때만 원본 음성 표현을
+`source=voice_confirmation` ItemAlias로 저장한다. 공식 이름과 정규화 결과가 같은
+표현은 불필요한 Alias로 저장하지 않는다. 같은 Household의 다른 공식 이름 또는
+Alias와 충돌하면 `409 ITEM_ALIAS_CONFLICT`로 전체 수정 Transaction을 거부한다.
+
+Planner에는 활성 품목별 승인된 Alias 목록도 전달한다. Provider 결과가 신규/미확정
+품목이더라도 Backend가 `normalized_name` 정확 일치, `normalized_alias` 정확 일치
+순서로 다시 연결한 뒤 전체 Plan을 검증한다. 후보 추론만으로 Alias를 자동 저장하지
+않는다.
+
+신규 품목 확인 Request는 Action Type, 공식 품목명, 기본 단위, 선택 카테고리, 수량,
+Alias 기억 여부를 받는다. 이 시점에는 InventoryItem이나 Snapshot을 만들지 않고
+확인된 신규 품목 정의만 Plan payload에 저장한다. 따라서 사용자가 화면을 나가거나
+Plan을 실행하지 않으면 빈 품목이 남지 않는다.
+
+Execute에서는 기존과 동일하게 VoiceRequest·Plan·기존 Snapshot을 Lock하고 최신
+중복 이름과 Alias 충돌을 다시 확인한다. 이후 다음 변경을 모두 기존 Execute
+Transaction 하나에서 처리한다.
+
+```text
+신규 InventoryItem
++ 수량 0 Snapshot
++ inventory_item_created Audit
++ 선택 시 voice_confirmation ItemAlias
++ 첫 source=voice InventoryEvent
++ Snapshot 수량 갱신
++ Event/Plan Audit와 Plan 완료 상태
+```
+
+신규 품목 `stock_out`은 수량 0에서 음수가 되므로 Plan 검증 단계에서 거부한다.
+동일 Plan 안에서 같은 신규 공식 이름을 여러 번 만드는 것도 거부한다. DB에는 기존
+`item_aliases` 테이블을 사용하므로 새 Migration은 없다.
+
+Flutter Action 수정 Sheet는 활성 기존 품목과 `새 품목으로 추가`를 함께 제공한다.
+신규 선택 시 이름·기본 단위·선택 카테고리를 입력하며, 기존/신규 모두
+`“원본 표현” 기억하기`를 사용자가 직접 선택할 수 있다. 확인된 신규 품목은 실행
+예정 상태로 표시되고, 미확정 상태가 남은 Plan은 Execute할 수 없다.
+
+검증(2026-07-28):
+
+- Backend `uv run pytest` → **113 passed, 15 skipped**. 실제 PostgreSQL 신규
+  품목+Snapshot+Event+Alias 통합 테스트를 추가했으며 현재 테스트 DB 미설정으로
+  Integration suite는 Skip됐다.
+- Backend Ruff 및 Mypy 84개 Source File 통과.
+- OpenAI Strict JSON Schema에서 `new_item`과 모든 중첩 필드가 required/nullable
+  계약으로 변환되는 것을 확인했다.
+- Flutter `flutter analyze` 통과, `flutter test` → **35 passed**.
+
+`product_spec.md` §42와 §69.4는 단위 변환을 Phase 3 범위로 명시한다. 따라서 음성
+녹음·STT의 Phase 4로 넘어가기 전에 3-6에서 `item_unit_conversions`와 사용자 확인
+기반 변환 규칙을 구현해야 한다.

@@ -12,12 +12,21 @@ from app.core.exceptions import (
     action_plan_not_found_error,
     action_plan_provider_error,
     action_plan_requires_action_error,
+    duplicate_item_name_error,
+    item_alias_conflict_error,
     planner_not_configured_error,
     unit_mismatch_error,
     voice_request_not_found_error,
     voice_request_not_plannable_error,
 )
-from app.models import ActionPlan, InventoryEvent, VoiceRequest
+from app.models import (
+    ActionPlan,
+    Inventory,
+    InventoryEvent,
+    InventoryItem,
+    ItemAlias,
+    VoiceRequest,
+)
 from app.providers import (
     InventoryPlannerProvider,
     PlannerNotConfiguredError,
@@ -31,13 +40,17 @@ from app.repositories.inventory_item_repository import (
     PlannerInventoryRecord,
 )
 from app.repositories.inventory_repository import (
+    CurrentInventoryRecord,
     InventoryRepository,
 )
+from app.repositories.item_alias_repository import ItemAliasRepository
 from app.repositories.voice_request_repository import VoiceRequestRepository
 from app.schemas.action_plan import (
     ActionPlanAction,
     ActionPlanActionUpdate,
     ActionPlanItemReference,
+    ActionPlanNewItemDefinition,
+    ActionPlanNewItemUpdate,
     ActionPlanPayload,
     ActionPlanQuantity,
     PlannerInventoryItem,
@@ -97,6 +110,7 @@ class ActionPlanValidator:
             record.item.id: record.current_quantity for record in inventory_records
         }
         seen_targets: set[tuple[str, str]] = set()
+        seen_new_item_names: set[str] = set()
 
         for action in payload.actions:
             item_reference = action.item
@@ -136,11 +150,59 @@ class ActionPlanValidator:
                 )
 
             if item_reference.is_new_item:
-                if not action.requires_user_input:
+                new_item = item_reference.new_item
+                if new_item is None:
+                    if not action.requires_user_input:
+                        issues.append(
+                            PlanValidationIssue(
+                                code="NEW_ITEM_REQUIRES_INPUT",
+                                message="신규 품목은 사용자의 확인이 필요합니다.",
+                                action_id=action.action_id,
+                            )
+                        )
+                    continue
+                if action.requires_user_input:
                     issues.append(
                         PlanValidationIssue(
-                            code="NEW_ITEM_REQUIRES_INPUT",
-                            message="신규 품목은 사용자의 확인이 필요합니다.",
+                            code="CONFIRMED_NEW_ITEM_STILL_REQUIRES_INPUT",
+                            message="확인된 신규 품목 Action의 미확정 상태가 남아 있습니다.",
+                            action_id=action.action_id,
+                        )
+                    )
+                normalized_new_name = normalize_item_name(new_item.name)
+                if normalized_new_name in seen_new_item_names:
+                    issues.append(
+                        PlanValidationIssue(
+                            code="DUPLICATE_NEW_ITEM",
+                            message="같은 신규 품목을 Plan에서 여러 번 만들 수 없습니다.",
+                            action_id=action.action_id,
+                        )
+                    )
+                seen_new_item_names.add(normalized_new_name)
+                if (
+                    quantity.raw_unit != new_item.default_unit
+                    or quantity.normalized_unit != new_item.default_unit
+                    or quantity.normalized_value != quantity.raw_value
+                ):
+                    issues.append(
+                        PlanValidationIssue(
+                            code="NEW_ITEM_QUANTITY_INVALID",
+                            message="신규 품목 수량은 확인한 기본 단위로 정규화되어야 합니다.",
+                            action_id=action.action_id,
+                        )
+                    )
+                    continue
+                normalized_value = Decimal(str(quantity.normalized_value))
+                next_quantity = (
+                    normalized_value
+                    if action.type in {"stock_in", "set_quantity"}
+                    else -normalized_value
+                )
+                if next_quantity < 0:
+                    issues.append(
+                        PlanValidationIssue(
+                            code="INSUFFICIENT_INVENTORY",
+                            message="신규 품목은 재고 0에서 소비로 시작할 수 없습니다.",
                             action_id=action.action_id,
                         )
                     )
@@ -232,6 +294,7 @@ class ActionPlanService:
         inventory_repository: InventoryRepository | None = None,
         inventory_event_repository: InventoryEventRepository | None = None,
         audit_log_repository: AuditLogRepository | None = None,
+        item_alias_repository: ItemAliasRepository | None = None,
     ) -> None:
         self.voice_request_repository = voice_request_repository
         self.action_plan_repository = action_plan_repository
@@ -242,6 +305,7 @@ class ActionPlanService:
             inventory_event_repository or InventoryEventRepository()
         )
         self.audit_log_repository = audit_log_repository or AuditLogRepository()
+        self.item_alias_repository = item_alias_repository or ItemAliasRepository()
 
     async def generate(
         self,
@@ -285,6 +349,10 @@ class ActionPlanService:
                 session,
                 household_id=household_id,
             )
+            aliases_by_item = await self.item_alias_repository.list_for_household(
+                session,
+                household_id=household_id,
+            )
             transcript = voice_request.transcript
 
         inventory_context = [
@@ -293,6 +361,9 @@ class ActionPlanService:
                 name=record.item.name,
                 default_unit=record.item.default_unit,
                 current_quantity=record.current_quantity,
+                aliases=[
+                    alias.alias for alias in aliases_by_item.get(record.item.id, [])
+                ],
             )
             for record in inventory_records
         ]
@@ -332,6 +403,15 @@ class ActionPlanService:
             current_inventory = await self.inventory_item_repository.list_active_for_planner(
                 session,
                 household_id=household_id,
+            )
+            current_aliases = await self.item_alias_repository.list_for_household(
+                session,
+                household_id=household_id,
+            )
+            payload = self._apply_exact_item_matches(
+                payload=payload,
+                inventory_records=current_inventory,
+                aliases_by_item=current_aliases,
             )
             issues = self.validator.validate(
                 payload=payload,
@@ -465,6 +545,105 @@ class ActionPlanService:
                 inventory_records=inventory_records,
             )
             action_plan.payload_json = updated_payload.model_dump(mode="json")
+            if data.remember_alias:
+                await self._save_confirmed_alias(
+                    session,
+                    household_id=household_id,
+                    item=record.item,
+                    raw_alias=payload.actions[action_index].item.raw_name,
+                )
+            await self.action_plan_repository.save(
+                session,
+                action_plan=action_plan,
+            )
+            return self._to_view(action_plan)
+
+    async def resolve_new_item(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        request_id: UUID,
+        action_id: str,
+        data: ActionPlanNewItemUpdate,
+    ) -> ActionPlanView:
+        async with session.begin():
+            action_plan = await self._get_editable_plan(
+                session,
+                request_id=request_id,
+                household_id=household_id,
+            )
+            normalized_name = normalize_item_name(data.name)
+            if await self.inventory_item_repository.normalized_name_exists(
+                session,
+                household_id=household_id,
+                normalized_name=normalized_name,
+            ):
+                raise duplicate_item_name_error(data.name)
+            conflicting_alias = (
+                await self.item_alias_repository.get_by_normalized_alias(
+                    session,
+                    household_id=household_id,
+                    normalized_alias=normalized_name,
+                )
+            )
+            if conflicting_alias is not None:
+                raise item_alias_conflict_error(
+                    data.name,
+                    str(conflicting_alias.inventory_item_id),
+                )
+
+            payload = ActionPlanPayload.model_validate(action_plan.payload_json)
+            action_index = self._find_action_index(
+                payload,
+                request_id=request_id,
+                action_id=action_id,
+            )
+            original_action = payload.actions[action_index]
+            resolved_action = ActionPlanAction(
+                action_id=action_id,
+                type=data.type,
+                item=ActionPlanItemReference(
+                    raw_name=original_action.item.raw_name,
+                    matched_item_id=None,
+                    matched_name=None,
+                    is_new_item=True,
+                    new_item=ActionPlanNewItemDefinition(
+                        name=data.name,
+                        default_unit=data.default_unit,
+                        category=data.category,
+                        remember_alias=data.remember_alias,
+                    ),
+                ),
+                quantity=ActionPlanQuantity(
+                    raw_value=data.quantity,
+                    raw_unit=data.default_unit,
+                    normalized_value=data.quantity,
+                    normalized_unit=data.default_unit,
+                    conversion_applied=False,
+                    conversion_reason=None,
+                ),
+                confidence=1,
+                warnings=[],
+                requires_user_input=False,
+            )
+            actions = list(payload.actions)
+            actions[action_index] = resolved_action
+            updated_payload = payload.model_copy(
+                update={
+                    "summary": f"사용자가 확인한 재고 변경 {len(actions)}건",
+                    "actions": actions,
+                }
+            )
+            inventory_records = await self.inventory_item_repository.list_active_for_planner(
+                session,
+                household_id=household_id,
+            )
+            self._validate_edited_payload(
+                payload=updated_payload,
+                inventory_records=inventory_records,
+            )
+            action_plan.payload_json = updated_payload.model_dump(mode="json")
             await self.action_plan_repository.save(
                 session,
                 action_plan=action_plan,
@@ -586,13 +765,92 @@ class ActionPlanService:
                 )
 
             records_by_id = {record.item.id: record for record in locked_records}
+            new_records_by_action: dict[str, CurrentInventoryRecord] = {}
+            for action in payload.actions:
+                new_item_definition = action.item.new_item
+                if not action.item.is_new_item or new_item_definition is None:
+                    continue
+                normalized_name = normalize_item_name(new_item_definition.name)
+                if await self.inventory_item_repository.normalized_name_exists(
+                    session,
+                    household_id=household_id,
+                    normalized_name=normalized_name,
+                ):
+                    raise duplicate_item_name_error(new_item_definition.name)
+                conflicting_alias = (
+                    await self.item_alias_repository.get_by_normalized_alias(
+                        session,
+                        household_id=household_id,
+                        normalized_alias=normalized_name,
+                    )
+                )
+                if conflicting_alias is not None:
+                    raise item_alias_conflict_error(
+                        new_item_definition.name,
+                        str(conflicting_alias.inventory_item_id),
+                    )
+                item = InventoryItem(
+                    id=uuid4(),
+                    household_id=household_id,
+                    name=new_item_definition.name,
+                    normalized_name=normalized_name,
+                    default_unit=new_item_definition.default_unit,
+                    category=new_item_definition.category,
+                    is_active=True,
+                )
+                snapshot = Inventory(
+                    id=uuid4(),
+                    household_id=household_id,
+                    item_id=item.id,
+                    quantity=Decimal("0"),
+                )
+                await self.inventory_item_repository.add_with_snapshot(
+                    session,
+                    item=item,
+                    snapshot=snapshot,
+                )
+                await self.audit_log_repository.add(
+                    session,
+                    household_id=household_id,
+                    user_id=user_id,
+                    action="inventory_item_created",
+                    target_type="inventory_item",
+                    target_id=item.id,
+                    before_json=None,
+                    after_json={
+                        "name": item.name,
+                        "normalized_name": item.normalized_name,
+                        "default_unit": item.default_unit,
+                        "category": item.category,
+                        "is_active": item.is_active,
+                        "voice_request_id": str(request_id),
+                        "action_id": action.action_id,
+                    },
+                )
+                if new_item_definition.remember_alias:
+                    await self._save_confirmed_alias(
+                        session,
+                        household_id=household_id,
+                        item=item,
+                        raw_alias=action.item.raw_name,
+                    )
+                record = CurrentInventoryRecord(snapshot=snapshot, item=item)
+                new_records_by_action[action.action_id] = record
+                locked_records.append(record)
+
             event_count = 0
             for action in payload.actions:
                 item_id = action.item.matched_item_id
                 normalized_value = action.quantity.normalized_value
-                if item_id is None or normalized_value is None:
-                    raise RuntimeError("검증된 Action에 실행 수량 또는 품목이 없습니다.")
-                record = records_by_id[item_id]
+                if normalized_value is None:
+                    raise RuntimeError("검증된 Action에 실행 수량이 없습니다.")
+                if action.item.is_new_item:
+                    record = new_records_by_action[action.action_id]
+                    item_id = record.item.id
+                else:
+                    if item_id is None:
+                        raise RuntimeError("검증된 Action에 실행 품목이 없습니다.")
+                    record = records_by_id[item_id]
                 quantity = Decimal(str(normalized_value))
                 event_type: str = action.type
                 signed_quantity = quantity if event_type == "stock_in" else -quantity
@@ -685,10 +943,14 @@ class ActionPlanService:
     ) -> list[PlanValidationIssue]:
         issues: list[PlanValidationIssue] = []
         for action in payload.actions:
+            item_unresolved = (
+                action.item.new_item is None
+                if action.item.is_new_item
+                else action.item.matched_item_id is None
+            )
             if (
                 action.requires_user_input
-                or action.item.is_new_item
-                or action.item.matched_item_id is None
+                or item_unresolved
                 or action.quantity.normalized_value is None
                 or action.quantity.normalized_unit is None
             ):
@@ -700,6 +962,106 @@ class ActionPlanService:
                     )
                 )
         return issues
+
+    async def _save_confirmed_alias(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        item: InventoryItem,
+        raw_alias: str,
+    ) -> None:
+        normalized_alias = normalize_item_name(raw_alias)
+        if not normalized_alias or normalized_alias == item.normalized_name:
+            return
+        official_item = await self.inventory_item_repository.get_by_normalized_name(
+            session,
+            household_id=household_id,
+            normalized_name=normalized_alias,
+        )
+        if official_item is not None and official_item.id != item.id:
+            raise item_alias_conflict_error(raw_alias, str(official_item.id))
+        existing = await self.item_alias_repository.get_by_normalized_alias(
+            session,
+            household_id=household_id,
+            normalized_alias=normalized_alias,
+        )
+        if existing is not None:
+            if existing.inventory_item_id == item.id:
+                return
+            raise item_alias_conflict_error(raw_alias, str(existing.inventory_item_id))
+        await self.item_alias_repository.add(
+            session,
+            alias=ItemAlias(
+                id=uuid4(),
+                household_id=household_id,
+                inventory_item_id=item.id,
+                alias=raw_alias.strip(),
+                normalized_alias=normalized_alias,
+                source="voice_confirmation",
+            ),
+        )
+
+    @staticmethod
+    def _apply_exact_item_matches(
+        *,
+        payload: ActionPlanPayload,
+        inventory_records: list[PlannerInventoryRecord],
+        aliases_by_item: dict[UUID, list[ItemAlias]],
+    ) -> ActionPlanPayload:
+        records_by_name = {
+            record.item.normalized_name: record for record in inventory_records
+        }
+        records_by_id = {record.item.id: record for record in inventory_records}
+        aliases_by_name = {
+            alias.normalized_alias: records_by_id[alias.inventory_item_id]
+            for aliases in aliases_by_item.values()
+            for alias in aliases
+            if alias.inventory_item_id in records_by_id
+        }
+        actions: list[ActionPlanAction] = []
+        for action in payload.actions:
+            normalized_raw_name = normalize_item_name(action.item.raw_name)
+            record = records_by_name.get(normalized_raw_name)
+            if record is None:
+                record = aliases_by_name.get(normalized_raw_name)
+            if record is None:
+                actions.append(action)
+                continue
+            unit_matches = action.quantity.raw_unit == record.item.default_unit
+            actions.append(
+                action.model_copy(
+                    update={
+                        "item": ActionPlanItemReference(
+                            raw_name=action.item.raw_name,
+                            matched_item_id=record.item.id,
+                            matched_name=record.item.name,
+                            is_new_item=False,
+                            new_item=None,
+                        ),
+                        "quantity": action.quantity.model_copy(
+                            update={
+                                "normalized_value": (
+                                    action.quantity.raw_value
+                                    if unit_matches
+                                    else None
+                                ),
+                                "normalized_unit": (
+                                    record.item.default_unit
+                                    if unit_matches
+                                    else None
+                                ),
+                                "conversion_applied": False,
+                                "conversion_reason": None,
+                            }
+                        ),
+                        "requires_user_input": (
+                            action.confidence < 0.7 or not unit_matches
+                        ),
+                    }
+                )
+            )
+        return payload.model_copy(update={"actions": actions})
 
     async def _get_request(
         self,

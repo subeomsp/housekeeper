@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import cast
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -69,6 +70,23 @@ class InventoryItemRepository:
             query = query.where(InventoryItem.id != exclude_item_id)
         item_id = await session.scalar(query.limit(1))
         return item_id is not None
+
+    async def get_by_normalized_name(
+        self,
+        session: AsyncSession,
+        *,
+        household_id: UUID,
+        normalized_name: str,
+    ) -> InventoryItem | None:
+        return cast(
+            InventoryItem | None,
+            await session.scalar(
+                select(InventoryItem).where(
+                    InventoryItem.household_id == household_id,
+                    InventoryItem.normalized_name == normalized_name,
+                )
+            )
+        )
 
     async def add_with_snapshot(
         self,
