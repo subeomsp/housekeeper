@@ -1,9 +1,10 @@
-# Voice Inventory — Flutter App (Phase 2)
+# Voice Inventory — Flutter App
 
 Flutter frontend for the Voice Inventory Agent. It talks to the FastAPI backend
 over HTTP; it never touches the database directly.
 
-For overall project status and the Phase 2 plan, read `../HANDOFF.md` (§19) first.
+Phase 2 Flutter 기본 앱은 완료됐다. 전체 프로젝트 상태와 다음 Phase 계획은
+`../HANDOFF.md` (§19)를 먼저 확인한다.
 
 ## Requirements
 
@@ -18,13 +19,13 @@ flutter pub get
 flutter run -d macos
 ```
 
-A native macOS window opens — that is the app during Phase 2 development. The
-final target is Android (Phase 5).
+A native macOS window opens for desktop development. The final target is
+Android (Phase 5).
 
-Current Phase 2 screens support inventory list/detail, manual stock-in/out,
-target quantity changes, event history with correction/cancellation, and item
-creation/edit/archive/restore. Cross-screen error and list-control finishing
-work follows next; see `../HANDOFF.md` §19.4.
+The completed basic app supports inventory list/detail and controls, manual
+stock-in/out, target quantity changes, event correction/cancellation, item
+creation/edit/archive/restore, refresh, and common error states. Phase 3 adds
+text-first Action Plan validation before real voice processing.
 
 ### API server
 

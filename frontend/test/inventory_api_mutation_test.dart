@@ -8,6 +8,33 @@ import 'package:voice_inventory/features/inventory/data/inventory_api.dart';
 
 void main() {
   group('InventoryApi mutations', () {
+    test('forwards every inventory list control to the backend', () async {
+      final adapter = _RecordingAdapter({'items': [], 'total': 0});
+      final api = InventoryApi(_dioWith(adapter));
+
+      await api.fetchInventory(
+        search: '우유',
+        category: '음료',
+        includeZero: false,
+        sort: 'name',
+        order: 'asc',
+        limit: 50,
+        offset: 50,
+      );
+
+      expect(adapter.options?.method, 'GET');
+      expect(adapter.options?.path, '/inventory');
+      expect(adapter.options?.queryParameters, {
+        'search': '우유',
+        'category': '음료',
+        'include_zero': false,
+        'sort': 'name',
+        'order': 'asc',
+        'limit': 50,
+        'offset': 50,
+      });
+    });
+
     test('creates a stock-in event with the backend contract', () async {
       final adapter = _RecordingAdapter({
         'previous_quantity': 2,

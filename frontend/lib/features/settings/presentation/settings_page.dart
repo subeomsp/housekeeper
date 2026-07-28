@@ -20,7 +20,7 @@ class SettingsPage extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.cloud_outlined),
             title: Text(AppConfig.apiBaseUrl),
-            subtitle: Text('${AppConfig.apiPrefix} · Phase 2'),
+            subtitle: Text('${AppConfig.apiPrefix} · Phase 2 완료'),
           ),
         ],
       ),

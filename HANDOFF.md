@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포됨. **Phase 2 (Flutter 앱) 진행 중** — 2-1(골격+재고목록), 2-2(품목상세), 2-3(입고/소비·목표수량), 2-4(기록 목록·Event 정정/취소), 2-5(품목 생성·수정·보관·복원) 완료, 다음은 2-6(목록 제어·오류/새로고침 마감·Phase 2 종료). 상세는 아래 §19.
+현재 단계: Phase 1 Backend 완료·배포, **Phase 2 Flutter 기본 앱 완료**. 다음은 Phase 3 Action Plan이며 초기에는 실제 음성 대신 텍스트 입력으로 검증한다. 상세는 아래 §19.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -932,9 +932,9 @@ Render 실행 설정, README 최종 동기화. 앱 런타임 `DATABASE_URL`은 �
 API 완료 보고는 코드를 읽지 않는 사용자가 제품 흐름을 검토할 수 있도록 사용처, 입력·출력, 내부 처리 순서, 실패 조건, 검토할 결정을 설명한다.
 ```
 
-## 19. Phase 2 (Flutter 앱) 진행 상황과 이어서 작업하는 법
+## 19. Phase 2 (Flutter 앱) 완료 상태와 이어서 작업하는 법
 
-Phase 1 백엔드는 완료·배포되었고, 지금은 **Phase 2 Flutter 앱**을 구현 중이다.
+Phase 1 백엔드는 완료·배포되었고, **Phase 2 Flutter 기본 앱도 완료**했다.
 이 절만 읽으면 다른 컴퓨터에서 `git clone` 후 그대로 이어서 작업할 수 있다.
 
 ### 19.1 배포/환경 사실 (그대로 사용)
@@ -1001,9 +1001,9 @@ frontend/lib/
 | 2-3 | **수동 입고/소비 + 목표 수량 설정** | `POST /inventory-events`(stock_in/out), `PUT /inventory/{id}/quantity` | ✅ 완료 |
 | 2-4 | **기록 목록** + Event 정정/취소 | `GET /inventory-events`, `PATCH`/`DELETE /inventory-events/{id}` | ✅ 완료 |
 | 2-5 | **품목 생성/수정/보관/복원** | `POST/PATCH/DELETE /inventory-items`, `POST .../restore` | ✅ 완료 |
-| 2-6 | 목록 제어·오류 상태·수동 새로고침 마감 + Phase 2 종료 | (횡단) | ⏭ 다음 |
+| 2-6 | 목록 제어·오류 상태·수동 새로고침 마감 + Phase 2 종료 | (횡단) | ✅ 완료 |
 
-Phase 2 완료 기준 체크리스트: product_spec.md **§61 Phase 2 항목** 및 스펙 §68 API 계약 참조.
+Phase 2 완료 기준은 product_spec.md **§61 Phase 2 항목**과 스펙 §68 API 계약을 기준으로 확인 완료했다.
 
 ### 19.5 2-3 구현 결과
 
@@ -1037,14 +1037,29 @@ Phase 2 완료 기준 체크리스트: product_spec.md **§61 Phase 2 항목** �
 - 검증(2026-07-28): Flutter 3.32.8 / Dart 3.8.1 기준 `flutter analyze` 이슈 0, `flutter test` 24 passed. API body·Soft Delete endpoint·전체 품목 Pagination·Form 기본값·단위 잠금·보관 안내·보관함 복원을 테스트한다.
 - 실제 Render Read-only 확인: 전체 품목 5개(활성 5, 보관 0)와 응답 필드 일치. 운영 데이터에는 생성·수정·보관·복원 요청을 보내지 않았다. Backend/DB/Migration 변경은 없다.
 
-### 19.8 2-6 착수 지침 (바로 다음 작업)
+### 19.8 2-6 구현 결과와 Phase 2 완료
 
-- `product_spec.md` §28.2와 §61을 다시 대조해 재고 목록의 카테고리, 수량 0 포함 여부, 이름/최근 변경/수량 정렬 제어를 마감한다. 보관 품목은 현재 별도 보관함으로 제공한다.
-- 목록·상세·기록·보관함·입력 Sheet의 Loading/Empty/Error/Retry와 수동 새로고침을 실제 네트워크 오류·Backend 오류 기준으로 일관되게 점검한다.
-- 검색 실행/초기화, 필터 변경, Pagination, Mutation 이후 Provider invalidate가 화면별로 올바른지 Widget Test를 보강한다.
-- Phase 2 완료 기준을 전체 확인하고 README/HANDOFF를 완료 상태로 전환한다. Xcode/CocoaPods가 준비된 장비에서는 macOS 실제 앱으로 Render Read-only 화면과 테스트 전용 DB 대상 쓰기 흐름을 수동 확인한다.
+- 재고 목록에 검색, 카테고리, 수량 0 포함 여부, 최근 변경순·이름순·수량 많은순·수량 적은순 정렬을 연결했다. 모든 조건은 `GET /inventory` Query로 보내며 변경 시 offset을 0으로 되돌린다.
+- 재고 목록도 기록과 동일하게 50건 단위 이전/다음 Pagination을 제공한다. 기본값은 `include_zero=true`, `sort=updated_at`, `order=desc`이며 기존 Backend 계약과 같다.
+- 카테고리는 별도 사전 API가 없으므로 자유 입력 후 Backend의 정확 일치 필터를 사용한다. 보관 품목 포함 여부는 활성 목록 Toggle 대신 기존의 별도 보관함 진입으로 제공한다.
+- `AsyncView`가 API 실패를 빈 목록으로 표시하지 않고 Backend/네트워크 메시지와 Retry를 제공하는지 테스트했다. 목록·상세·기록·보관함은 App Bar 또는 당겨서 새로고침을 제공한다.
+- 수동 입고·소비·목표 수량 설정 후 기록 Provider도 invalidate하도록 보완했다. 모든 Mutation은 영향을 받는 재고 목록·상세·기록·보관함/품목 참조를 함께 갱신한다.
+- 검증(2026-07-28): Flutter 3.32.8 / Dart 3.8.1 기준 `flutter analyze` 이슈 0, `flutter test` 28 passed. 검색·필터·정렬·Pagination 상태와 API Query, Error/Empty 분리를 포함한다.
+- 실제 Render Read-only 확인: 이름순 첫 페이지 응답과 존재하지 않는 카테고리의 빈 필터 응답이 Front 계약과 일치했다. 첫 요청은 Render Sleep으로 20초 타임아웃됐고 `/ready` 기동 후 정상 응답했다.
+- 이 장비에는 전체 Xcode/CocoaPods가 없어 macOS 실제 앱 실행은 미검증이다. 운영 DB 쓰기 테스트는 하지 않았으며, 실제 UI 쓰기 흐름은 Xcode가 준비된 장비에서 테스트 전용 DB를 대상으로 확인해야 한다.
 
-### 19.9 검증/작업 관례
+Phase 2 구현 순서의 API Client, 재고 목록·상세, 기록, 품목 CRUD/보관/복원, 현재 수량 설정, 수동 입고/소비, Event 정정/취소, 새로고침, 오류 상태는 모두 완료했다.
+
+전체 MVP 화면 명세 §28.1의 Home 항목 중 Household 이름은 Phase 6 인증/공유 API, 음성 기록 버튼은 Phase 4 녹음 기능에 의존한다. “재고 부족” 기준은 현재 모델과 명세에 임계값이 정의되어 있지 않다. 세 항목은 임의 구현하지 않고 해당 Phase 또는 제품 결정 시 연결한다.
+
+### 19.9 Phase 3 착수 지침 (다음 작업)
+
+- `product_spec.md` Phase 3 순서대로 VoiceRequest, ActionPlan, ItemAlias 모델과 Migration부터 설계한다. 실제 녹음·STT는 제외하고 텍스트 Transcript 입력으로 시작한다.
+- LLM은 DB를 수정하지 않고 Execution Plan만 생성하며, 사용자 승인 전 InventoryEvent를 만들지 않는다.
+- Action 수정·삭제·승인 UI와 Execute API를 만들고, Execute는 승인된 Plan의 모든 Event·Snapshot·Audit를 하나의 Transaction으로 처리하며 중복 실행을 차단한다.
+- 품목 연결이 불확실하거나 미등록 품목이면 자동 확정하지 않고 후보 선택·신규 품목 확인을 거친다. 사용자가 승인한 음성 표현만 `voice_confirmation` ItemAlias로 저장한다.
+
+### 19.10 검증/작업 관례
 
 - 프론트: `cd frontend && flutter analyze`(이슈 0 유지) + `flutter test`. 각 슬라이스 후 앱 재실행으로 실제 Render 데이터로 확인.
 - 백엔드 변경 시: `cd backend && uv run pytest && uv run ruff check . && uv run mypy app tests`.

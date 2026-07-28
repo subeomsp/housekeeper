@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/errors/api_exception.dart';
 import '../../../core/format/quantity_format.dart';
+import '../../history/presentation/history_providers.dart';
 import '../data/inventory_api.dart';
 import 'inventory_providers.dart';
 
@@ -70,6 +71,7 @@ Future<void> showInventoryQuantitySheet({
 
   ref.invalidate(inventoryDetailProvider(itemId));
   ref.invalidate(inventoryListProvider);
+  ref.invalidate(historyPageProvider);
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }
 
