@@ -1,7 +1,7 @@
 # Voice Inventory Agent 인수인계 문서
 
 작성일: 2026-07-21 (최종 갱신: 2026-07-28)  
-현재 단계: Phase 1 Backend 완료·배포됨. **Phase 2 (Flutter 앱) 진행 중** — 2-1(골격+재고목록), 2-2(품목상세), 2-3(입고/소비·목표수량) 완료, 다음은 2-4(기록 목록·Event 정정/취소). 상세는 아래 §19.
+현재 단계: Phase 1 Backend 완료·배포됨. **Phase 2 (Flutter 앱) 진행 중** — 2-1(골격+재고목록), 2-2(품목상세), 2-3(입고/소비·목표수량), 2-4(기록 목록·Event 정정/취소) 완료, 다음은 2-5(품목 생성·수정·보관·복원). 상세는 아래 §19.
 
 ## 1. 가장 먼저 읽을 문서
 
@@ -977,7 +977,7 @@ frontend/lib/
 └── features/
     ├── shell/home_shell.dart       # 하단 네비 홈/재고/기록/설정
     ├── home/ · settings/           # 홈/설정 (설정=현재 API 주소 표시)
-    ├── history/                    # 기록 탭 (placeholder → 2-4에서 구현)
+    ├── history/                    # 기록 목록·필터·Pagination·Event 정정/취소
     └── inventory/
         ├── domain/  inventory_item.dart · inventory_detail.dart
         ├── data/inventory_api.dart # GET /inventory, GET /inventory/{id}
@@ -999,8 +999,8 @@ frontend/lib/
 | 2-1 | 골격 + core + **재고 목록** | `GET /inventory` | ✅ 완료 (커밋 `Phase 2-1`) |
 | 2-2 | **품목 상세** + 최근 Event | `GET /inventory/{id}` | ✅ 완료 (커밋 `Phase 2-2`) |
 | 2-3 | **수동 입고/소비 + 목표 수량 설정** | `POST /inventory-events`(stock_in/out), `PUT /inventory/{id}/quantity` | ✅ 완료 |
-| 2-4 | **기록 목록** + Event 정정/취소 | `GET /inventory-events`, `PATCH`/`DELETE /inventory-events/{id}` | ⏭ 다음 |
-| 2-5 | **품목 생성/수정/보관/복원** | `POST/PATCH/DELETE /inventory-items`, `POST .../restore` | 대기 |
+| 2-4 | **기록 목록** + Event 정정/취소 | `GET /inventory-events`, `PATCH`/`DELETE /inventory-events/{id}` | ✅ 완료 |
+| 2-5 | **품목 생성/수정/보관/복원** | `POST/PATCH/DELETE /inventory-items`, `POST .../restore` | ⏭ 다음 |
 | 2-6 | 오류 상태·수동 새로고침 마감 + Phase 2 종료 | (횡단) | 대기 |
 
 Phase 2 완료 기준 체크리스트: product_spec.md **§61 Phase 2 항목** 및 스펙 §68 API 계약 참조.
@@ -1015,14 +1015,25 @@ Phase 2 완료 기준 체크리스트: product_spec.md **§61 Phase 2 항목** �
 - 검증(2026-07-28): Flutter 3.32.8 / Dart 3.8.1 기준 `flutter analyze` 이슈 0, `flutter test` 9 passed. API body·응답 계약, 수량 경계값, 세 모드 UI와 목표 수량 기본값을 테스트한다.
 - macOS 실제 빌드/실행은 현재 작업 장비에 전체 Xcode와 CocoaPods가 없어 수행하지 못했다. 컴파일·정적 분석·Widget Test는 통과했다.
 
-### 19.6 2-4 착수 지침 (바로 다음 작업)
+### 19.6 2-4 구현 결과
 
-- 기록 탭 placeholder를 `GET /api/v1/inventory-events` 기반 목록으로 바꾼다. 기본 정렬은 Backend 계약대로 `created_at desc`, 동일 시각 `id desc`이며 Pagination과 품목·Event Type·기간 필터를 연결한다.
-- 각 기록에서 정정은 `PATCH /inventory-events/{event_id}`, 취소는 `DELETE /inventory-events/{event_id}`를 호출한다. 원본 Event를 직접 수정·삭제하는 UI나 API는 만들지 않는다.
-- 정정 입력은 `stock_in`/`stock_out`, 양수 수량, 품목 기본 단위, 선택 메모만 허용한다. 성공 후 기록 목록·해당 품목 상세·재고 목록을 모두 갱신한다.
-- 이미 취소된 기록, Reversal 기록, 정정 결과 음수 재고 등 Backend 거부 사유는 공통 오류 메시지로 표시하고 확인이 필요한 취소 동작에는 확인 Dialog를 둔다.
+- 기록 탭을 `GET /inventory-events` 기반 목록으로 교체했다. Backend 정렬을 그대로 사용하고 50건 단위 이전/다음 Pagination, 품목·Event Type·기간 필터, 당겨서 새로고침을 제공한다.
+- Event 응답에는 품목명이 없으므로 `GET /inventory-items?include_inactive=true`를 100개씩 끝까지 조회해 참조 목록을 캐시한다. 이로써 보관된 품목의 과거 Event도 현재 공식 이름으로 표시한다.
+- 기록에는 현재 품목명, 한글 Event Type, 출처, 시각, 메모, 부호가 포함된 수량을 표시한다. `event_reversal`은 정정·취소 메뉴를 노출하지 않는다.
+- 정정은 원본 방향·수량·메모를 기본값으로 열고 `stock_in`/`stock_out`, 양수 수량, 원본 단위만 전송한다. Backend가 원본 Row와 Snapshot Row를 Lock한 뒤 Reversal과 대체 Event, Snapshot, Audit를 한 Transaction으로 저장한다.
+- 취소 전 확인 Dialog에서 원본이 삭제되지 않고 반대 수량의 Reversal이 추가됨을 안내한다. 요청 중 같은 Event의 재요청을 막고 Backend가 Reversal·Snapshot·Audit를 한 Transaction으로 반영한다.
+- 정정·취소 성공 후 기록 목록, 재고 목록, 해당 품목 상세를 함께 invalidate한다. 이미 취소된 원본은 현재 목록 응답에 `reversed_at`이 없어서 메뉴를 미리 숨길 수 없으며, 재시도 시 Backend의 `EVENT_ALREADY_REVERSED` 메시지를 표시한다.
+- 검증(2026-07-28): Flutter 3.32.8 / Dart 3.8.1 기준 `flutter analyze` 이슈 0, `flutter test` 15 passed. 필터·Pagination 상태, 실제 API query/body, 보관 품목 Pagination, 정정 기본값, Reversal Action 제한을 테스트한다.
+- 실제 Render Read-only 확인: `/ready` 200, Event 5건·품목 5건 응답과 Front 모델 필드 일치. 운영 데이터에는 정정·취소 요청을 보내지 않았다. macOS 실행은 이 장비의 Xcode/CocoaPods 부재로 미검증이다.
 
-### 19.7 검증/작업 관례
+### 19.7 2-5 착수 지침 (바로 다음 작업)
+
+- 품목 목록에서 생성, 상세에서 정보 수정·보관, 보관 품목 목록에서 복원 흐름을 연결한다.
+- 생성은 `POST /inventory-items`, 수정은 `PATCH /inventory-items/{id}`, 보관은 `DELETE /inventory-items/{id}`, 복원은 `POST /inventory-items/{id}/restore`를 사용한다.
+- 품목명·기본 단위·카테고리를 입력하며 이름 정규화·중복, 단위 변경과 보관의 현재 수량 0 제한은 Backend 오류 메시지로 표시한다.
+- 보관은 Soft Delete이며 Snapshot과 Event를 보존한다는 점을 확인 Dialog에 명시한다. 성공 후 품목·재고·기록의 품목 참조 캐시를 갱신한다.
+
+### 19.8 검증/작업 관례
 
 - 프론트: `cd frontend && flutter analyze`(이슈 0 유지) + `flutter test`. 각 슬라이스 후 앱 재실행으로 실제 Render 데이터로 확인.
 - 백엔드 변경 시: `cd backend && uv run pytest && uv run ruff check . && uv run mypy app tests`.

@@ -21,9 +21,9 @@ flutter run -d macos
 A native macOS window opens — that is the app during Phase 2 development. The
 final target is Android (Phase 5).
 
-Current Phase 2 screens support inventory list/detail plus manual stock-in,
-stock-out, and final target quantity changes. Event correction and item editing
-follow in the next slices; see `../HANDOFF.md` §19.4.
+Current Phase 2 screens support inventory list/detail, manual stock-in/out,
+target quantity changes, and event history with correction/cancellation. Item
+creation, editing, archive, and restore follow next; see `../HANDOFF.md` §19.4.
 
 ### API server
 
